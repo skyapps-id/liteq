@@ -1,3 +1,4 @@
+use chrono::{Duration, Utc};
 use lite_job_redis::{Job, JobQueue, QueueConfig, RedisConfig, RetryConfig};
 use serde::{Deserialize, Serialize};
 
@@ -35,7 +36,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         text: "Hello this is task from queue".to_string(),
     };
 
-    let job = Job::new(task, "my_queue");
+    let eta = Utc::now() + Duration::seconds(30);
+    let job = Job::new(task, "my_queue").with_eta(eta);
     let job_id = queue.enqueue(job).await?;
     
     println!("✓ Task sent!");

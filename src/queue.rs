@@ -2,6 +2,7 @@ use crate::config::{QueueConfig, RedisConfig};
 use crate::error::{JobError, JobResult};
 use crate::job::Job;
 use crate::retry::{retry_async, RetryConfig};
+use chrono::Utc;
 use redis::AsyncCommands;
 use std::sync::Arc;
 
@@ -77,6 +78,23 @@ impl JobQueue {
         match result {
             Some(job_json) => {
                 let job = Job::from_json(&job_json)?;
+                
+                if let Some(eta) = job.eta {
+                    if Utc::now() < eta {
+                        retry_async(
+                            || async {
+                                let mut conn = client.get_multiplexed_async_connection().await
+                                    .map_err(JobError::from)?;
+                                conn.rpush::<_, _, ()>(&queue_key, &job_json).await
+                                    .map_err(JobError::from)?;
+                                Ok(())
+                            },
+                            Some(self.retry_config.clone()),
+                        ).await?;
+                        return Ok(None);
+                    }
+                }
+                
                 Ok(Some(job))
             }
             None => Ok(None),
