@@ -14,8 +14,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config = RedisConfig::new("redis://127.0.0.1:6379");
 
-    println!("=== Queue Consumer ===\n");
-
     // Setup queue with custom retry config (optional)
     // Default: 10 attempts, 500ms initial delay, 30s max delay
     let retry_config = RetryConfig::new()
@@ -30,7 +28,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Waiting for tasks from queue 'my_queue'...");
     println!("Press Ctrl+C to stop");
-    println!("💡 If Redis is down, will auto-reconnect up to 20x\n");
 
     loop {
         // Try to dequeue job
