@@ -69,20 +69,18 @@ impl RedisPool {
         self.metrics
             .get_pool_status(&self.queue_name)
             .await
-            .unwrap_or_else(|| PoolStatus {
+            .unwrap_or(PoolStatus {
                 max_size: self.pool_size,
                 size: 0,
                 available: self.pool_size,
                 active: 0,
                 waiting: 0,
+                scheduled_jobs: 0,
+                regular_jobs: 0,
             })
     }
 
     pub fn supervisor(&self) -> &Arc<ConnectionSupervisor> {
         &self.supervisor
-    }
-
-    pub fn queue_name(&self) -> &str {
-        &self.queue_name
     }
 }

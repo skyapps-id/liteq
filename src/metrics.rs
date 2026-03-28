@@ -17,6 +17,8 @@ pub struct PoolStatus {
     pub available: usize,
     pub active: usize,
     pub waiting: usize,
+    pub scheduled_jobs: usize,
+    pub regular_jobs: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -54,22 +56,6 @@ impl PerformanceMetrics {
         self.failed_operations += 1;
         self.last_operation_time = Some(Instant::now());
     }
-
-    pub fn avg_latency_ms(&self) -> f64 {
-        if self.operation_count > 0 {
-            self.total_latency_ms / self.operation_count as f64
-        } else {
-            0.0
-        }
-    }
-
-    pub fn success_rate(&self) -> f64 {
-        if self.total_operations > 0 {
-            self.successful_operations as f64 / self.total_operations as f64
-        } else {
-            1.0
-        }
-    }
 }
 
 impl Default for PerformanceMetrics {
@@ -85,6 +71,9 @@ pub struct QueueHealth {
     pub metrics: PerformanceMetrics,
     pub error_rate: f64,
     pub last_check: Instant,
+    pub scheduled_jobs_count: usize,
+    pub regular_jobs_count: usize,
+    pub total_pending_jobs: usize,
 }
 
 pub struct MetricsRegistry {
@@ -116,18 +105,13 @@ impl MetricsRegistry {
                     available: 0,
                     active: 0,
                     waiting: 0,
+                    scheduled_jobs: 0,
+                    regular_jobs: 0,
                 },
                 performance: PerformanceMetrics::new(),
                 errors: Vec::new(),
             },
         );
-    }
-
-    pub async fn update_pool_status(&self, queue_name: &str, status: PoolStatus) {
-        let mut metrics = self.queue_metrics.write().await;
-        if let Some(queue_metrics) = metrics.get_mut(queue_name) {
-            queue_metrics.pool_status = status;
-        }
     }
 
     pub async fn record_operation(&self, queue_name: &str, latency_ms: f64, success: bool) {
@@ -149,6 +133,14 @@ impl MetricsRegistry {
             if queue_metrics.errors.len() > 100 {
                 queue_metrics.errors.remove(0);
             }
+        }
+    }
+
+    pub async fn update_job_counts(&self, queue_name: &str, scheduled: usize, regular: usize) {
+        let mut metrics = self.queue_metrics.write().await;
+        if let Some(queue_metrics) = metrics.get_mut(queue_name) {
+            queue_metrics.pool_status.scheduled_jobs = scheduled;
+            queue_metrics.pool_status.regular_jobs = regular;
         }
     }
 
@@ -180,9 +172,14 @@ impl MetricsRegistry {
                 0.0
             };
 
+            let total_jobs = queue_metrics.pool_status.scheduled_jobs + queue_metrics.pool_status.regular_jobs;
+
+            // Health status considers both errors and job backlog
             let status = if error_rate > 0.5 || queue_metrics.pool_status.available == 0 {
                 HealthStatus::Unhealthy
-            } else if error_rate > 0.1 || queue_metrics.pool_status.available < 2 {
+            } else if error_rate > 0.1 || queue_metrics.pool_status.available < 2
+                || total_jobs > 10000 {
+                // Degraded if: high error rate, low available connections, OR large backlog
                 HealthStatus::Degraded
             } else {
                 HealthStatus::Healthy
@@ -194,6 +191,9 @@ impl MetricsRegistry {
                 metrics: queue_metrics.performance.clone(),
                 error_rate,
                 last_check: Instant::now(),
+                scheduled_jobs_count: queue_metrics.pool_status.scheduled_jobs,
+                regular_jobs_count: queue_metrics.pool_status.regular_jobs,
+                total_pending_jobs: total_jobs,
             }
         } else {
             QueueHealth {
@@ -204,10 +204,15 @@ impl MetricsRegistry {
                     available: 0,
                     active: 0,
                     waiting: 0,
+                    scheduled_jobs: 0,
+                    regular_jobs: 0,
                 },
                 metrics: PerformanceMetrics::new(),
                 error_rate: 1.0,
                 last_check: Instant::now(),
+                scheduled_jobs_count: 0,
+                regular_jobs_count: 0,
+                total_pending_jobs: 0,
             }
         }
     }
