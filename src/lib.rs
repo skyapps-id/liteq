@@ -9,8 +9,9 @@ pub mod pool;
 pub mod metrics;
 pub mod circuit_breaker;
 pub mod connection_supervisor;
+pub mod consumer_registry;
 
-pub use config::{RedisConfig, QueueConfig};
+pub use config::{RedisConfig, QueueConfig, ConsumerInfo};
 pub use error::{JobError, JobResult};
 pub use job::Job;
 pub use queue::{JobQueue, QueueStats};
@@ -21,3 +22,4 @@ pub use pool::RedisPool;
 pub use metrics::{HealthStatus, PerformanceMetrics, PoolStatus, QueueHealth};
 pub use circuit_breaker::{CircuitBreaker, CircuitState};
 pub use connection_supervisor::{ConnectionSupervisor, ConnectionState};
+pub use consumer_registry::{ConsumerRegistry, get_consumer_position};

@@ -1,6 +1,13 @@
 use chrono::Utc;
 use lite_job_redis::{JobResult, SubscriberRegistry};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Task {
+    id: u32,
+    text: String,
+}
 
 #[derive(Clone)]
 struct AppData {
@@ -28,14 +35,16 @@ impl AppData {
 }
 
 fn handle_orders(data: Vec<u8>, app_data: Arc<AppData>) -> JobResult<()> {
-    let msg = String::from_utf8_lossy(&data);
+    // Deserialize payload only (Task)
+    let task: Task = serde_json::from_slice(&data)?;
     
     app_data.increment_counter();
     let count = app_data.get_counter();
     
     let timestamp = Utc::now().format("%Y-%m-%d %H:%M:%S%.3f UTC");
     
-    println!("📦 Order received: {}", msg);
+    println!("📦 Order received: {}", task.text);
+    println!("   🆔 Order ID: {}", task.id);
     println!("   🕐 Processed at: {}", timestamp);
     println!("   📊 DB Connection: {}", app_data.db_url);
     println!("   🔑 API Key: {}***", &app_data.api_key[..10]);
@@ -59,7 +68,7 @@ fn handle_logs(data: Vec<u8>, app_data: Arc<AppData>) -> JobResult<()> {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
 
-    println!("🚀 Consumer Demo - ZSET Optimization\n");
+    println!("🚀 Consumer Demo - Multi-Instance Fair Distribution\n");
     println!("Features:");
     println!("  ✓ ZSET for scheduled jobs (no roundtrips!)");
     println!("  ✓ LIST for regular jobs");
@@ -68,7 +77,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  ✓ Single retry loop (logged once)");
     println!("  ✓ Workers wait for 'ready' signal");
     println!("  ✓ Clean logs - no retry spam!");
-    println!("  ✓ ✨ Dependency Injection with .data()!\n");
+    println!("  ✓ ✨ Dependency Injection with .data()!");
+    println!("  🔥 NEW: Auto-registration with heartbeat!");
+    println!("  🔥 NEW: Fair distribution across instances!\n");
 
     let mut registry = SubscriberRegistry::new();
     let app_data = AppData::new();
@@ -78,7 +89,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     registry.register("orders", handle_orders)
         .with_data(app_data)
         .with_pool_size(20)
-        .with_concurrency(5)
+        .with_concurrency(1)
         .build();
 
     // Log queue with dependency injection and smaller pool (low traffic)
@@ -94,6 +105,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  • No more LPOP → parse → RPUSH back loop");
     println!("  • 50-70% reduction in network roundtrips");
     println!("  • 40% reduction in CPU (no redundant JSON parsing)");
+    println!("\n🔥 Multi-Instance Fair Distribution:");
+    println!("  • Auto-register consumer on startup");
+    println!("  • Heartbeat every 10s (TTL 30s)");
+    println!("  • Modulo-based fair job distribution");
+    println!("  • No starvation - equal job share");
+    println!("  • Run 2+ instances to see round-robin in action!");
     println!("\n📋 Job Processing Priority:");
     println!("  1️⃣  Ready scheduled jobs (ETA <= now)");
     println!("  2️⃣  Regular jobs (no ETA)");
@@ -110,7 +127,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  - Each queue has its own data instance!");
     println!("  - Use .build() to complete registration\n");
 
-    println!("⏳ Waiting for jobs... (Run producer first to enqueue jobs)\n");
+    println!("⏳ Waiting for jobs... (Run producer first to enqueue jobs)");
+    println!("💡 TIP: Run this example in 2+ terminals to see fair distribution!\n");
 
     registry.run().await?;
     

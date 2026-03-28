@@ -21,16 +21,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Scenario: Mix of regular and scheduled jobs\n");
 
-    println!("1️⃣  Sending regular job (no ETA)...");
-    let task1 = Task {
-        id: 1,
-        text: "Process order immediately".to_string(),
-    };
-    let job1 = Job::new(task1, "orders");
-    let job_id1 = queue.enqueue(job1).await?;
-    println!("   ✓ Regular job → LIST: {}\n", job_id1);
+    println!("1️⃣  Sending 10 regular jobs (no ETA)...");
+    for i in 1..=3 {
+        let task = Task {
+            id: i,
+            text: format!("Process order immediately #{}", i),
+        };
 
-    println!("2️⃣  Sending scheduled job (ETA +10 seconds)...");
+        let job = Job::new(task, "orders");
+        let job_id = queue.enqueue(job).await?;
+
+        println!("   ✓ Regular job {} → LIST: {}", i, job_id);
+    }
+
+    /*  println!("2️⃣  Sending scheduled job (ETA +10 seconds)...");
     let task2 = Task {
         id: 2,
         text: "Send reminder email".to_string(),
@@ -39,9 +43,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let job2 = Job::new(task2, "orders").with_eta(eta);
     let job_id2 = queue.enqueue(job2).await?;
     println!("   ✓ Scheduled job → ZSET: {}", job_id2);
-    println!("   ⏰ ETA: 10 seconds from now\n");
+    println!("   ⏰ ETA: 10 seconds from now\n"); */
 
-    println!("3️⃣  Sending another scheduled job (ETA +5 seconds, ready sooner)...");
+    /* println!("3️⃣  Sending another scheduled job (ETA +5 seconds, ready sooner)...");
     let task3 = Task {
         id: 3,
         text: "Process payment".to_string(),
@@ -50,9 +54,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let job3 = Job::new(task3, "orders").with_eta(eta_sooner);
     let job_id3 = queue.enqueue(job3).await?;
     println!("   ✓ Scheduled job → ZSET: {}", job_id3);
-    println!("   ⏰ ETA: 5 seconds from now\n");
+    println!("   ⏰ ETA: 5 seconds from now\n"); */
 
-    println!("4️⃣  Sending ready scheduled job (ETA -5 seconds, should process first)...");
+    /* println!("4️⃣  Sending ready scheduled job (ETA -5 seconds, should process first)...");
     let task4 = Task {
         id: 4,
         text: "Urgent notification".to_string(),
@@ -61,7 +65,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let job4 = Job::new(task4, "orders").with_eta(eta_past);
     let job_id4 = queue.enqueue(job4).await?;
     println!("   ✓ Ready scheduled job → ZSET: {}", job_id4);
-    println!("   ⏰ ETA: Past (ready now)\n");
+    println!("   ⏰ ETA: Past (ready now)\n"); */
 
     println!("💡 ZSET Optimization:");
     println!("   ✓ No more roundtrips: LPOP → parse → RPUSH back");

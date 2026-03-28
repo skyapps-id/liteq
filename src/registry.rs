@@ -1,5 +1,6 @@
-use crate::config::{QueueConfig, RedisConfig};
+use crate::config::{QueueConfig, RedisConfig, ConsumerInfo};
 use crate::connection_supervisor::ConnectionState;
+use crate::consumer_registry::ConsumerRegistry;
 use crate::error::JobResult;
 use crate::metrics::MetricsRegistry;
 use crate::pool::RedisPool;
@@ -9,6 +10,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
+use futures_util::future::join_all;
 
 type Handler = Arc<dyn Fn(Vec<u8>) -> JobResult<()> + Send + Sync>;
 
@@ -35,12 +37,14 @@ struct QueueGroup {
     pool: Arc<RedisPool>,
     queue: Arc<JobQueue>,
     workers: Vec<(Handler, usize)>,
+    consumer_info: Option<ConsumerInfo>,
 }
 
 struct QueueGroupWithData {
     pool: Arc<RedisPool>,
     queue: Arc<JobQueue>,
     workers: Vec<(HandlerWithData, Arc<dyn std::any::Any + Send + Sync>, usize)>,
+    consumer_info: Option<ConsumerInfo>,
 }
 
 pub struct SubscriberRegistry {
@@ -127,6 +131,56 @@ impl SubscriberRegistry {
         let mut queue_groups: HashMap<String, QueueGroup> = HashMap::new();
         let mut queue_groups_with_data: HashMap<String, QueueGroupWithData> = HashMap::new();
 
+        // Get unique queues and register consumers
+        let mut unique_queues: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for worker_config in &self.workers {
+            unique_queues.insert(worker_config.queue.clone());
+        }
+        for worker_config in &self.workers_with_data {
+            unique_queues.insert(worker_config.queue.clone());
+        }
+
+        // Register consumer for each unique queue (in parallel)
+        let consumer_registry = Arc::new(ConsumerRegistry::new(self.redis_config.clone()));
+        let mut consumer_infos: HashMap<String, ConsumerInfo> = HashMap::new();
+
+        let registration_tasks: Vec<_> = unique_queues
+            .iter()
+            .map(|queue_name| {
+                let queue_name = queue_name.clone();
+                let consumer_registry = consumer_registry.clone();
+                tokio::spawn(async move {
+                    let result = consumer_registry.register_and_start_heartbeat(&queue_name).await;
+                    (queue_name, result)
+                })
+            })
+            .collect();
+
+        let results = join_all(registration_tasks).await;
+
+        for result in results {
+            if let Ok((queue_name, registration_result)) = result {
+                match registration_result {
+                    Ok(info) => {
+                        tracing::info!(
+                            queue = %queue_name,
+                            consumer_id = info.id,
+                            total_consumers = info.total,
+                            "Auto-registered consumer for queue"
+                        );
+                        consumer_infos.insert(queue_name.clone(), info);
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            queue = %queue_name,
+                            "Failed to register consumer, will use single-consumer mode"
+                        );
+                    }
+                }
+            }
+        }
+
         for worker_config in self.workers {
             if !queue_groups.contains_key(&worker_config.queue) {
                 let pool = Arc::new(
@@ -149,9 +203,13 @@ impl SubscriberRegistry {
                     .with_retry_config(self.retry_config.clone()),
                 );
 
+                let consumer_info = consumer_infos.get(&worker_config.queue).cloned();
+
                 tracing::info!(
                     queue = %worker_config.queue,
                     max_size = pool.status().await.max_size,
+                    consumer_id = consumer_info.as_ref().map(|c| c.id).unwrap_or(0),
+                    total_consumers = consumer_info.as_ref().map(|c| c.total).unwrap_or(1),
                     "Queue '{}' initialized with supervisor (max: {})",
                     worker_config.queue,
                     pool.status().await.max_size
@@ -163,6 +221,7 @@ impl SubscriberRegistry {
                         pool,
                         queue,
                         workers: Vec::new(),
+                        consumer_info,
                     },
                 );
             }
@@ -194,9 +253,13 @@ impl SubscriberRegistry {
                     .with_retry_config(self.retry_config.clone()),
                 );
 
+                let consumer_info = consumer_infos.get(&worker_config.queue).cloned();
+
                 tracing::info!(
                     queue = %worker_config.queue,
                     max_size = pool.status().await.max_size,
+                    consumer_id = consumer_info.as_ref().map(|c| c.id).unwrap_or(0),
+                    total_consumers = consumer_info.as_ref().map(|c| c.total).unwrap_or(1),
                     "Queue '{}' initialized with supervisor and DI (max: {})",
                     worker_config.queue,
                     pool.status().await.max_size
@@ -208,6 +271,7 @@ impl SubscriberRegistry {
                         pool,
                         queue,
                         workers: Vec::new(),
+                        consumer_info,
                     },
                 );
             }
@@ -220,6 +284,7 @@ impl SubscriberRegistry {
         let mut handles = Vec::new();
 
         for (queue_name, group) in queue_groups {
+            let consumer_info = group.consumer_info.clone();
             for (worker_idx, (handler, concurrency)) in group.workers.into_iter().enumerate() {
                 for i in 0..concurrency {
                     let queue_clone = group.queue.clone();
@@ -227,17 +292,26 @@ impl SubscriberRegistry {
                     let pool = group.pool.clone();
                     let queue_name = queue_name.clone();
                     let metrics = self.metrics.clone();
+                    let consumer_info_clone = consumer_info.clone();
 
                     let handle = tokio::spawn(async move {
                         tracing::info!(
                             worker_id = format!("{}-{}", worker_idx, i),
                             queue = %queue_name,
+                            consumer_id = consumer_info_clone.as_ref().map(|c| c.id).unwrap_or(0),
+                            total_consumers = consumer_info_clone.as_ref().map(|c| c.total).unwrap_or(1),
                             "Worker #{}-{} started for queue: {}",
                             worker_idx, i, queue_name
                         );
 
                         loop {
-                            if let Ok(Some(job)) = queue_clone.dequeue::<Value>().await {
+                            let job_result = if let Some(ref ci) = consumer_info_clone {
+                                queue_clone.dequeue_with_consumer::<Value>(ci).await
+                            } else {
+                                queue_clone.dequeue::<Value>().await
+                            };
+
+                            if let Ok(Some(job)) = job_result {
                                 tracing::info!(
                                     job_id = %job.id,
                                     queue = %job.queue,
@@ -292,6 +366,7 @@ impl SubscriberRegistry {
         }
 
         for (queue_name, group) in queue_groups_with_data {
+            let consumer_info = group.consumer_info.clone();
             for (worker_idx, (handler, data, concurrency)) in group.workers.into_iter().enumerate() {
                 for i in 0..concurrency {
                     let queue_clone = group.queue.clone();
@@ -300,18 +375,27 @@ impl SubscriberRegistry {
                     let queue_name = queue_name.clone();
                     let metrics = self.metrics.clone();
                     let data_clone = data.clone();
+                    let consumer_info_clone = consumer_info.clone();
 
                     let handle = tokio::spawn(async move {
                         tracing::info!(
                             worker_id = format!("{}-{}", worker_idx, i),
                             queue = %queue_name,
                             has_di = true,
+                            consumer_id = consumer_info_clone.as_ref().map(|c| c.id).unwrap_or(0),
+                            total_consumers = consumer_info_clone.as_ref().map(|c| c.total).unwrap_or(1),
                             "Worker #{}-{} started for queue: {} (with DI)",
                             worker_idx, i, queue_name
                         );
 
                         loop {
-                            if let Ok(Some(job)) = queue_clone.dequeue::<Value>().await {
+                            let job_result = if let Some(ref ci) = consumer_info_clone {
+                                queue_clone.dequeue_with_consumer::<Value>(ci).await
+                            } else {
+                                queue_clone.dequeue::<Value>().await
+                            };
+
+                            if let Ok(Some(job)) = job_result {
                                 tracing::info!(
                                     job_id = %job.id,
                                     queue = %job.queue,

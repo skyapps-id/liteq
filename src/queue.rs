@@ -1,4 +1,4 @@
-use crate::config::{QueueConfig, RedisConfig};
+use crate::config::{QueueConfig, RedisConfig, ConsumerInfo};
 use crate::error::{JobError, JobResult};
 use crate::job::Job;
 use crate::retry::{retry_async, RetryConfig};
@@ -25,12 +25,73 @@ local job = redis.call('LPOP', list_key)
 return job
 "#;
 
+static DEQUEUE_CONSUMER_SCRIPT: &str = r#"
+local list_key = KEYS[1]
+local zset_key = KEYS[2]
+local meta_key = KEYS[3]
+local current_time = tonumber(ARGV[1])
+local consumer_id = tonumber(ARGV[2])
+local num_consumers = tonumber(ARGV[3])
+
+-- Get current counter
+local current_counter = tonumber(redis.call('HGET', meta_key, 'counter') or '0')
+
+-- Bootstrap: if counter is 0, let ANY consumer take first job
+if current_counter == 0 then
+    -- 1. Check ready scheduled jobs (get first element)
+    local ready_jobs = redis.call('ZRANGEBYSCORE', zset_key, '-inf', current_time)
+    if ready_jobs and #ready_jobs > 0 then
+        local job_json = ready_jobs[1]
+        redis.call('ZREM', zset_key, job_json)
+        redis.call('HINCRBY', meta_key, 'counter', 1)
+        return job_json
+    end
+
+    -- 2. Get from regular queue
+    local job = redis.call('LPOP', list_key)
+    if job then
+        redis.call('HINCRBY', meta_key, 'counter', 1)
+        return job
+    end
+
+    return nil
+end
+
+-- Normal operation: use modulo distribution
+local target_consumer = current_counter % num_consumers
+
+-- Only return job if this consumer is the target
+if target_consumer == consumer_id then
+    -- 1. Check ready scheduled jobs (get first element)
+    local ready_jobs = redis.call('ZRANGEBYSCORE', zset_key, '-inf', current_time)
+    if ready_jobs and #ready_jobs > 0 then
+        local job_json = ready_jobs[1]
+        redis.call('ZREM', zset_key, job_json)
+        -- Increment counter ONLY when job is actually taken
+        redis.call('HINCRBY', meta_key, 'counter', 1)
+        return job_json
+    end
+
+    -- 2. Get from regular queue
+    local job = redis.call('LPOP', list_key)
+    if job then
+        -- Increment counter ONLY when job is actually taken
+        redis.call('HINCRBY', meta_key, 'counter', 1)
+        return job
+    end
+end
+
+-- Not this consumer's turn or no jobs available
+return nil
+"#;
+
 pub struct JobQueue {
     config: Arc<QueueConfig>,
     redis_config: Arc<RedisConfig>,
     client: redis::Client,
     retry_config: RetryConfig,
     dequeue_script: Script,
+    dequeue_consumer_script: Script,
 }
 
 impl JobQueue {
@@ -41,7 +102,8 @@ impl JobQueue {
     ) -> JobResult<Self> {
         let client = redis::Client::open(redis_config.url.clone())?;
         let dequeue_script = Script::new(DEQUEUE_SCRIPT);
-        
+        let dequeue_consumer_script = Script::new(DEQUEUE_CONSUMER_SCRIPT);
+
         Ok(Self {
             config: Arc::new(queue_config),
             redis_config: Arc::new(redis_config),
@@ -51,6 +113,7 @@ impl JobQueue {
                 .with_initial_delay(500)
                 .with_max_delay(30000),
             dequeue_script,
+            dequeue_consumer_script,
         })
     }
 
@@ -103,12 +166,12 @@ impl JobQueue {
         let schedule_key = self.redis_config.make_key(&format!("schedule:{}", self.config.name));
         let client = self.client.clone();
         let current_time = Utc::now().timestamp();
-        
+
         let result: Option<String> = retry_async(
             || async {
                 let mut conn = client.get_multiplexed_async_connection().await
                     .map_err(JobError::from)?;
-                
+
                 let job_json: Option<String> = self.dequeue_script
                     .key(&queue_key)
                     .key(&schedule_key)
@@ -116,14 +179,63 @@ impl JobQueue {
                     .invoke_async(&mut conn)
                     .await
                     .map_err(JobError::from)?;
-                
+
                 Ok(job_json)
             },
             Some(self.retry_config.clone()),
         ).await?;
-        
+
         match result {
             Some(job_json) => {
+                let job = Job::from_json(&job_json)?;
+                Ok(Some(job))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Gets next job with consumer-aware fair distribution
+    pub async fn dequeue_with_consumer<T>(&self, consumer_info: &ConsumerInfo) -> JobResult<Option<Job<T>>>
+    where
+        T: for<'de> serde::Deserialize<'de>,
+    {
+        let queue_key = self.redis_config.make_key(&format!("queue:{}", self.config.name));
+        let schedule_key = self.redis_config.make_key(&format!("schedule:{}", self.config.name));
+        let meta_key = self.redis_config.make_key(&format!("{}:meta", self.config.name));
+        let client = self.client.clone();
+        let current_time = Utc::now().timestamp();
+
+        let result: Option<String> = retry_async(
+            || async {
+                let mut conn = client.get_multiplexed_async_connection().await
+                    .map_err(JobError::from)?;
+
+                let job_json: Option<String> = self.dequeue_consumer_script
+                    .key(&queue_key)
+                    .key(&schedule_key)
+                    .key(&meta_key)
+                    .arg(current_time)
+                    .arg(consumer_info.id)
+                    .arg(consumer_info.total)
+                    .invoke_async(&mut conn)
+                    .await
+                    .map_err(JobError::from)?;
+
+                Ok(job_json)
+            },
+            Some(self.retry_config.clone()),
+        ).await?;
+
+        match result {
+            Some(job_json) => {
+                tracing::debug!(
+                    queue = %self.config.name,
+                    consumer_id = consumer_info.id,
+                    total_consumers = consumer_info.total,
+                    "Job dequeued by consumer {} of {}",
+                    consumer_info.id,
+                    consumer_info.total
+                );
                 let job = Job::from_json(&job_json)?;
                 Ok(Some(job))
             }

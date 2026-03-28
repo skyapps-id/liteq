@@ -43,3 +43,29 @@ impl QueueConfig {
         Self { name: name.into() }
     }
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConsumerInfo {
+    pub uuid: String,
+    pub id: usize,
+    pub total: usize,
+    pub queue_name: String,
+}
+
+impl ConsumerInfo {
+    pub fn new(uuid: String, id: usize, total: usize, queue_name: String) -> Self {
+        Self {
+            uuid,
+            id,
+            total,
+            queue_name,
+        }
+    }
+
+    pub fn should_process_job(&self, job_counter: i64) -> bool {
+        if self.total == 0 {
+            return true;
+        }
+        (job_counter % self.total as i64) == self.id as i64
+    }
+}
