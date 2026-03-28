@@ -56,22 +56,10 @@ impl RetryConfig {
         self.jitter_ms = jitter_ms;
         self
     }
-
-    pub fn with_circuit_breaker(mut self, threshold: u32, timeout_secs: u64) -> Self {
-        self.circuit_breaker_threshold = Some(threshold);
-        self.circuit_breaker_timeout_secs = Some(timeout_secs);
-        self
-    }
-
-    pub fn without_circuit_breaker(mut self) -> Self {
-        self.circuit_breaker_threshold = None;
-        self.circuit_breaker_timeout_secs = None;
-        self
-    }
 }
 
 thread_local! {
-    static CIRCUIT_BREAKER: std::cell::RefCell<Option<Arc<CircuitBreaker>>> = std::cell::RefCell::new(None);
+    static CIRCUIT_BREAKER: std::cell::RefCell<Option<Arc<CircuitBreaker>>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Execute an async operation with retry logic, exponential backoff with jitter, and circuit breaker
@@ -108,7 +96,7 @@ where
                     });
                     
                     if !allowed {
-                        warn!("🔴 Circuit breaker is OPEN - blocking request");
+                        warn!("Circuit breaker is OPEN - blocking request");
                         return Err(JobError::QueueError("Circuit breaker is open".to_string()));
                     }
                 }
@@ -122,7 +110,7 @@ where
                 if config.circuit_breaker_threshold.is_some() {
                     CIRCUIT_BREAKER.with(|breaker| {
                         if let Some(b) = breaker.borrow().as_ref() {
-                            let _ = tokio::task::block_in_place(|| {
+                            tokio::task::block_in_place(|| {
                                 tokio::runtime::Handle::current().block_on(b.record_success())
                             });
                         }
@@ -133,7 +121,7 @@ where
                 if attempt > 1 {
                     if let Some(ref first_err) = first_error_msg {
                         info!(
-                            "✅ Redis reconnected successfully! (attempt {}/{} recovered from: {})",
+                            "Redis reconnected successfully! (attempt {}/{} recovered from: {})",
                             attempt,
                             config.max_attempts,
                             first_err
@@ -152,17 +140,16 @@ where
                 let is_connection_error = is_retryable_error(&err);
 
                 // Record failure in circuit breaker
-                if is_connection_error {
-                    if config.circuit_breaker_threshold.is_some() {
+                if is_connection_error
+                    && config.circuit_breaker_threshold.is_some() {
                         CIRCUIT_BREAKER.with(|breaker| {
                             if let Some(b) = breaker.borrow().as_ref() {
-                                let _ = tokio::task::block_in_place(|| {
+                                tokio::task::block_in_place(|| {
                                     tokio::runtime::Handle::current().block_on(b.record_failure())
                                 });
                             }
                         });
                     }
-                }
 
                 if is_connection_error && attempt < config.max_attempts {
                     // Add jitter to prevent thundering herd
@@ -174,7 +161,7 @@ where
                     };
 
                     warn!(
-                        "⚠️  Redis operation failed (attempt {}/{}): {}. Retrying in {:?}+{:?}ms...",
+                        "Redis operation failed (attempt {}/{}): {}. Retrying in {:?}+{:?}ms...",
                         attempt,
                         config.max_attempts,
                         err,
@@ -196,7 +183,7 @@ where
                     );
                 } else {
                     error!(
-                        "❌ Redis operation failed after {} attempts: {}",
+                        "Redis operation failed after {} attempts: {}",
                         attempt, err
                     );
                     return Err(err);

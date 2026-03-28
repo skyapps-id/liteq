@@ -78,23 +78,16 @@ impl CircuitBreaker {
 
     pub async fn record_failure(&self) {
         let current = self.failure_count.fetch_add(1, Ordering::Relaxed);
-        
+
         if current + 1 >= self.failure_threshold {
             *self.state.write().await = CircuitState::Open;
             *self.last_failure_time.write().await = Some(Instant::now());
-            tracing::warn!("🔴 Circuit breaker OPEN after {} failures", current + 1);
+            tracing::warn!("Circuit breaker OPEN after {} failures", current + 1);
         }
     }
 
     pub async fn state(&self) -> CircuitState {
         self.state.read().await.clone()
-    }
-
-    pub async fn reset(&self) {
-        *self.state.write().await = CircuitState::Closed;
-        self.failure_count.store(0, Ordering::Relaxed);
-        self.success_count.store(0, Ordering::Relaxed);
-        *self.last_failure_time.write().await = None;
     }
 }
 

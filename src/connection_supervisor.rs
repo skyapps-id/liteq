@@ -12,7 +12,6 @@ use tracing::{error, info, warn};
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ConnectionState {
     Connected,
-    Connecting,
     Disconnected,
 }
 
@@ -95,7 +94,7 @@ impl ConnectionSupervisor {
             match Self::test_connection(&config).await {
                 Ok(_) => {
                     if current_state != ConnectionState::Connected {
-                        info!("✅ Redis connected - notifying workers");
+                        info!("Redis connected - notifying workers");
                         *state.write().await = ConnectionState::Connected;
                         ready_notify.notify_waiters();
                         consecutive_failures = 0;
@@ -106,14 +105,14 @@ impl ConnectionSupervisor {
                     consecutive_failures += 1;
 
                     if current_state != ConnectionState::Disconnected {
-                        warn!("⚠️ Redis disconnected - starting reconnection");
+                        warn!("Redis disconnected - starting reconnection");
                         *state.write().await = ConnectionState::Disconnected;
                     }
 
                     // Apply backoff if failing repeatedly
                     if consecutive_failures > max_failures_before_backoff {
                         let backoff_secs = backoff_duration.as_secs();
-                        warn!("⚠️ Multiple failures detected - backing off for {}s", backoff_secs);
+                        warn!("Multiple failures detected - backing off for {}s", backoff_secs);
                         sleep(backoff_duration).await;
                         backoff_duration = std::cmp::min(
                             backoff_duration * 2,
@@ -123,14 +122,14 @@ impl ConnectionSupervisor {
                         // Attempt reconnection with retry logic
                         match Self::reconnect(&config, &retry_config).await {
                             Ok(_) => {
-                                info!("✅ Redis reconnected successfully");
+                                info!("Redis reconnected successfully");
                                 *state.write().await = ConnectionState::Connected;
                                 ready_notify.notify_waiters();
                                 consecutive_failures = 0;
                                 backoff_duration = Duration::from_secs(1);
                             }
                             Err(reconnect_err) => {
-                                error!("❌ Reconnection failed: {}", reconnect_err);
+                                error!("Reconnection failed: {}", reconnect_err);
                             }
                         }
                     }
@@ -163,13 +162,13 @@ impl ConnectionSupervisor {
         for attempt in 1..=max_attempts {
             match Self::test_connection(config).await {
                 Ok(_) => {
-                    info!("✅ Reconnection successful on attempt {}", attempt);
+                    info!("Reconnection successful on attempt {}", attempt);
                     return Ok(());
                 }
                 Err(e) => {
                     if attempt < max_attempts {
                         warn!(
-                            "⚠️ Reconnect attempt {}/{} failed: {}. Retrying in {:?}...",
+                            "Reconnect attempt {}/{} failed: {}. Retrying in {:?}...",
                             attempt, max_attempts, e, current_delay
                         );
                         sleep(current_delay).await;
@@ -183,7 +182,7 @@ impl ConnectionSupervisor {
                             ),
                         );
                     } else {
-                        error!("❌ Reconnection failed after {} attempts", attempt);
+                        error!("Reconnection failed after {} attempts", attempt);
                         return Err(e);
                     }
                 }
