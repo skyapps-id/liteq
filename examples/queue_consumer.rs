@@ -57,7 +57,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("🚀 Consumer Demo - Multi-Instance Fair Distribution\n");
 
-    let mut registry = SubscriberRegistry::new();
+    let redis_url = std::env::var("REDIS_URL")
+        .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+    
+    let mut registry = SubscriberRegistry::new()
+        .with_redis(redis_url);
     let app_data = AppData::new();
     let log_data = AppData::new();
 
