@@ -1,4 +1,4 @@
-use lite_job_redis::{JobQueue, QueueConfig, RedisConfig, SubscriberRegistry};
+use liteq::{JobQueue, QueueConfig, RedisConfig, SubscriberRegistry};
 use std::env;
 use std::time::Duration as StdDuration;
 use tokio::time::sleep;
@@ -29,7 +29,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         regular_count, scheduled_count, stats.total_pending);
 
     let mut registry = SubscriberRegistry::new();
-    let handler = |_data: Vec<u8>| -> lite_job_redis::JobResult<()> {
+    let handler = |_data: Vec<u8>| -> liteq::JobResult<()> {
         Ok(())
     };
 

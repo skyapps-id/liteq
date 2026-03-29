@@ -771,7 +771,7 @@ Benefits:
 ### Example 1: Basic Usage (Zero Config)
 
 ```rust
-use lite_job_redis::{JobResult, SubscriberRegistry};
+use liteq::{JobResult, SubscriberRegistry};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

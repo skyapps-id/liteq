@@ -2,7 +2,7 @@
 
 ## Overview
 
-lite-job-redis has been optimized using **Redis Sorted Sets (ZSET)** for scheduled jobs with ETA. This implementation delivers significant performance improvements:
+liteq has been optimized using **Redis Sorted Sets (ZSET)** for scheduled jobs with ETA. This implementation delivers significant performance improvements:
 
 - **50% reduction** in network roundtrips for scheduled jobs
 - **40% reduction** in CPU usage (eliminated redundant JSON parsing)

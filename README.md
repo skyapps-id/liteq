@@ -1,4 +1,4 @@
-# lite-job-redis
+# liteq
 
 High-performance job queue library for Rust using Redis with auto-retry, connection pooling, dependency injection, and multi-consumer fair distribution.
 
@@ -21,7 +21,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-lite-job-redis = "0.1"
+liteq = "1.0"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -35,7 +35,7 @@ chrono = "0.4"
 ### Producer (Send Jobs with ETA Scheduling)
 
 ```rust
-use lite_job_redis::{Job, JobQueue, QueueConfig, RedisConfig};
+use liteq::{Job, JobQueue, QueueConfig, RedisConfig};
 use chrono::Utc;
 
 #[tokio::main]
@@ -66,7 +66,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ### Consumer (Process Jobs with Multi-Instance Support)
 
 ```rust
-use lite_job_redis::{JobResult, SubscriberRegistry};
+use liteq::{JobResult, SubscriberRegistry};
 use std::sync::Arc;
 
 #[derive(Clone)]

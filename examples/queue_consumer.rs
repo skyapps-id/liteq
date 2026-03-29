@@ -1,4 +1,4 @@
-use lite_job_redis::{JobResult, SubscriberRegistry};
+use liteq::{JobResult, SubscriberRegistry};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 

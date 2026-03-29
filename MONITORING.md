@@ -2,7 +2,7 @@
 
 ## Overview
 
-lite-job-redis provides comprehensive monitoring and observability features for production deployments, including:
+liteq provides comprehensive monitoring and observability features for production deployments, including:
 
 - **Real-time job counts** - Track scheduled and regular jobs
 - **Health checks** - Monitor pool status, error rates, and performance
@@ -27,7 +27,7 @@ lite-job-redis provides comprehensive monitoring and observability features for 
 Track the number of pending jobs in real-time:
 
 ```rust
-use lite_job_redis::{JobQueue, QueueConfig, RedisConfig};
+use liteq::{JobQueue, QueueConfig, RedisConfig};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -77,7 +77,7 @@ println!("Total pending: {}", stats.total_pending);
 ### Basic Health Check
 
 ```rust
-use lite_job_redis::SubscriberRegistry;
+use liteq::SubscriberRegistry;
 
 let registry = SubscriberRegistry::new();
 
@@ -148,7 +148,7 @@ println!("Last operation: {:?}", metrics.last_operation_time);
 For scenarios requiring high throughput, use batch dequeue:
 
 ```rust
-use lite_job_redis::{Job, JobQueue, QueueConfig, RedisConfig};
+use liteq::{Job, JobQueue, QueueConfig, RedisConfig};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

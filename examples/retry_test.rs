@@ -1,4 +1,4 @@
-use lite_job_redis::{Job, JobQueue, QueueConfig, RedisConfig};
+use liteq::{Job, JobQueue, QueueConfig, RedisConfig};
 use tokio::time::{sleep, Duration};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

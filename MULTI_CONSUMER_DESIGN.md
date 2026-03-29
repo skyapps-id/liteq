@@ -6,7 +6,7 @@ This document describes the **initial design**. The actual implementation uses *
 
 ## Problem Statement
 
-When running multiple consumer instances of `lite-job-redis`, jobs are **not distributed fairly** across instances due to `LPOP` race condition in Redis LIST.
+When running multiple consumer instances of `liteq`, jobs are **not distributed fairly** across instances due to `LPOP` race condition in Redis LIST.
 
 ### Current Behavior
 
