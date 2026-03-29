@@ -1,7 +1,16 @@
 use chrono::{DateTime, Utc};
+use rand::Rng;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
+
+/// Generate a unique job ID without UUID
+/// Format: {timestamp_ms}-{random_u32}
+/// Example: "1712345678901-1234567890"
+fn generate_job_id() -> String {
+    let timestamp_ms = Utc::now().timestamp_millis();
+    let random: u32 = rand::thread_rng().gen();
+    format!("{}-{}", timestamp_ms, random)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Job<T> {
@@ -28,7 +37,7 @@ impl<T> Job<T> {
         T: Serialize,
     {
         Self {
-            id: Uuid::new_v4().to_string(),
+            id: generate_job_id(),
             payload,
             queue: queue.into(),
             created_at: Utc::now(),

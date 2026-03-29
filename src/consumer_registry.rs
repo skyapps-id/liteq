@@ -2,10 +2,19 @@ use crate::config::{RedisConfig, ConsumerInfo};
 use crate::error::{JobError, JobResult};
 use crate::retry::{retry_async, RetryConfig};
 use chrono::Utc;
+use rand::Rng;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
-use uuid::Uuid;
+
+/// Generate a unique consumer ID without UUID
+/// Format: {timestamp_ms}-{random_u32}
+/// Example: "1712345678901-1234567890"
+fn generate_consumer_id() -> String {
+    let timestamp_ms = Utc::now().timestamp_millis();
+    let random: u32 = rand::thread_rng().gen();
+    format!("{}-{}", timestamp_ms, random)
+}
 
 pub struct ConsumerRegistry {
     redis_config: Arc<RedisConfig>,
@@ -28,7 +37,7 @@ impl ConsumerRegistry {
         &self,
         queue_name: &str,
     ) -> JobResult<ConsumerInfo> {
-        let my_uuid = Uuid::new_v4().to_string();
+        let my_uuid = generate_consumer_id();
         let started_at = Utc::now().timestamp();
         let consumer_key = self.redis_config.make_key(&format!(
             "consumers:{}:{}",
