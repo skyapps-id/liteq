@@ -34,7 +34,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("   ✓ Regular job {} → LIST: {}", i, job_id);
     }
 
-    /*  println!("2️⃣  Sending scheduled job (ETA +10 seconds)...");
+    println!("2️⃣  Sending scheduled job (ETA +10 seconds)...");
     let task2 = Task {
         id: 2,
         text: "Send reminder email".to_string(),
@@ -43,9 +43,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let job2 = Job::new(task2, "orders").with_eta(eta);
     let job_id2 = queue.enqueue(job2).await?;
     println!("   ✓ Scheduled job → ZSET: {}", job_id2);
-    println!("   ⏰ ETA: 10 seconds from now\n"); */
+    println!("   ⏰ ETA: 10 seconds from now\n");
 
-    /* println!("3️⃣  Sending another scheduled job (ETA +5 seconds, ready sooner)...");
+    println!("3️⃣  Sending another scheduled job (ETA +5 seconds, ready sooner)...");
     let task3 = Task {
         id: 3,
         text: "Process payment".to_string(),
@@ -54,9 +54,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let job3 = Job::new(task3, "orders").with_eta(eta_sooner);
     let job_id3 = queue.enqueue(job3).await?;
     println!("   ✓ Scheduled job → ZSET: {}", job_id3);
-    println!("   ⏰ ETA: 5 seconds from now\n"); */
+    println!("   ⏰ ETA: 5 seconds from now\n");
 
-    /* println!("4️⃣  Sending ready scheduled job (ETA -5 seconds, should process first)...");
+    println!("4️⃣  Sending ready scheduled job (ETA -5 seconds, should process first)...");
     let task4 = Task {
         id: 4,
         text: "Urgent notification".to_string(),
@@ -65,13 +65,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let job4 = Job::new(task4, "orders").with_eta(eta_past);
     let job_id4 = queue.enqueue(job4).await?;
     println!("   ✓ Ready scheduled job → ZSET: {}", job_id4);
-    println!("   ⏰ ETA: Past (ready now)\n"); */
-
-    println!("💡 ZSET Optimization:");
-    println!("   ✓ No more roundtrips: LPOP → parse → RPUSH back");
-    println!("   ✓ Single atomic Lua script operation");
-    println!("   ✓ Scheduled jobs in ZSET, regular jobs in LIST");
-    println!("   ✓ Priority: Ready scheduled > Regular > Future scheduled\n");
+    println!("   ⏰ ETA: Past (ready now)\n");
 
     println!("📊 Job Processing Order Expected:");
     println!("   1. Job #4 (Ready scheduled - ETA past)");

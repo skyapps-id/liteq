@@ -1,24 +1,24 @@
-# Konsep Multi-Consumer Fair Distribution
+# Multi-Consumer Fair Distribution Flow
 
-## Perbaikan Terbaru (2026-03-28)
+## Recent Fixes (2026-03-28)
 
 ### 🔧 Fix: Parallel Consumer Registration
 
-**Masalah:**
-Pendaftaran consumer dilakukan secara sequential, menyebabkan:
-- Queue pertama: 8 detik untuk register
-- Queue kedua: Harus menunggu queue pertama → Total 16 detik
-- Job yang di-enqueue selama pendaftaran tidak diproses
+**Problem:**
+Consumer registration was done sequentially, causing:
+- First queue: 8 seconds to register
+- Second queue: Had to wait for first queue → Total 16 seconds
+- Jobs enqueued during registration were not processed
 
-**Solusi:**
-Ubah ke parallel registration menggunakan `tokio::spawn` dan `join_all`:
+**Solution:**
+Changed to parallel registration using `tokio::spawn` and `join_all`:
 ```rust
-// Sebelum: Sequential (~8 detik per queue)
+// Before: Sequential (~8 seconds per queue)
 for queue_name in unique_queues {
     consumer_registry.register_and_start_heartbeat(&queue_name).await;
 }
 
-// Sesudah: Parallel (~8 detik total untuk semua queue)
+// After: Parallel (~8 seconds total for all queues)
 let registration_tasks: Vec<_> = unique_queues
     .iter()
     .map(|queue_name| {
@@ -30,69 +30,71 @@ let registration_tasks: Vec<_> = unique_queues
 let results = join_all(registration_tasks).await;
 ```
 
-**Hasil:**
-- ✅ Semua queue register secara simultan
-- ✅ Waktu startup: 8 detik (berapapun jumlah queue)
-- ✅ Consumer siap memproses job segera
+**Result:**
+- ✅ All queues register simultaneously
+- ✅ Startup time: 8 seconds (regardless of queue count)
+- ✅ Consumers ready to process jobs immediately
 
-### 🔧 Fix: Konsistensi Payload Handler
+### 🔧 Fix: Payload Handler Consistency
 
-**Masalah:**
-Worker mengirim full `Job<T>` ke handler bukan hanya payload:
+**Problem:**
+Workers were sending full `Job<T>` to handlers instead of just payload:
 - Error: `invalid type: integer '2', expected a string at line 1 column 7`
-- Handler tidak bisa deserialize job dengan benar
-- Worker dengan DI kirim payload, worker tanpa DI kirim full Job (tidak konsisten)
+- Handlers couldn't deserialize jobs properly
+- Workers with DI sent payload, workers without DI sent full Job (inconsistent)
 
-**Solusi:**
-Standarisasi semua worker untuk mengirim **payload-only**:
+**Solution:**
+Standardized all workers to send **payload-only**:
 ```rust
-// Sebelum (tidak konsisten):
-// Worker dengan DI:   job_data = serde_json::to_vec(&job.payload)     ✅
-// Worker tanpa DI:   data = serde_json::to_vec(&job)                  ❌
+// Before (inconsistent):
+// Worker with DI:   job_data = serde_json::to_vec(&job.payload)     ✅
+// Worker without:  data = serde_json::to_vec(&job)                  ❌
 
-// Sesudah (konsisten):
-// Semua worker:      data = serde_json::to_vec(&job.payload)          ✅
+// After (consistent):
+// All workers:      data = serde_json::to_vec(&job.payload)          ✅
 ```
 
-Update handler untuk deserialize payload langsung:
+Updated handlers to deserialize payload directly:
 ```rust
-// Sebelum:
+// Before:
 let job: Job<Task> = serde_json::from_slice(&data)?;
 
-// Sesudah:
+// After:
 let task: Task = serde_json::from_slice(&data)?;
 ```
 
-**Hasil:**
-- ✅ Tidak ada error serialisasi
-- ✅ Interface handler konsisten
-- ✅ API lebih sederhana dan intuitif
+**Result:**
+- ✅ No serialization errors
+- ✅ Consistent handler interface
+- ✅ Simpler, more intuitive API
 
 ---
 
-**Masalah Utama:**
-Ketika menjalankan multiple instances dari consumer yang sama, jobs **tidak terbagi secara fair**.
+## Problem Statement
+
+**Main Issue:**
+When running multiple consumer instances of the same consumer, jobs are **not distributed fairly**.
 
 ```rust
-// Scenario: 3 consumer instances polling queue yang sama
-t=0ms:   Consumer-1 LPOP → dapat Job-A ✅
-t=10ms:  Consumer-2 LPOP → queue kosong ❌
-t=20ms:  Consumer-3 LPOP → queue kosong ❌
+// Scenario: 3 consumer instances polling the same queue
+t=0ms:   Consumer-1 LPOP → gets Job-A ✅
+t=10ms:  Consumer-2 LPOP → queue empty ❌
+t=20ms:  Consumer-3 LPOP → queue empty ❌
 
-t=500ms: Consumer-1 LPOP → dapat Job-B ✅
-t=510ms:  Consumer-2 LPOP → queue kosong ❌
-t=520ms:  Consumer-3 LPOP → queue kosong ❌
+t=500ms: Consumer-1 LPOP → gets Job-B ✅
+t=510ms:  Consumer-2 LPOP → queue empty ❌
+t=520ms:  Consumer-3 LPOP → queue empty ❌
 
-Hasil:
-- Consumer-1: Dapat SEMUA jobs (overwhelmed)
+Result:
+- Consumer-1: Gets ALL jobs (overwhelmed)
 - Consumer-2: IDLE (0 jobs, wasted resources)
 - Consumer-3: IDLE (0 jobs, wasted resources)
 ```
 
-**Penyebab:**
-- Redis `LPOP` adalah operasi "first come, first served"
-- Tidak ada coordination antar consumers
-- Consumer tercepat/sering poll → menang terus
+**Root Cause:**
+- Redis `LPOP` is a "first come, first served" operation
+- No coordination between consumers
+- Fastest/most frequent poller wins
 
 ---
 
@@ -100,19 +102,19 @@ Hasil:
 
 ### Core Concept
 
-Setiap consumer instance **mendaftarkan dirinya** ke Redis dan mendapatkan **ID unik**. Jobs didistribusikan menggunakan **modulo arithmetic**:
+Each consumer instance **registers itself** with Redis and gets a **unique ID**. Jobs are distributed using **modulo arithmetic**:
 
 ```rust
 target_consumer = job_counter % total_consumers
 
 if target_consumer == my_id {
-    // Ambil job ini
+    // Take this job
 } else {
-    // Skip, biarkan consumer lain yang ambil
+    // Skip, let another consumer take it
 }
 ```
 
-**Hasil:** Perfect fair distribution! 🎯
+**Result:** Perfect fair distribution! 🎯
 
 ---
 
@@ -121,7 +123,7 @@ if target_consumer == my_id {
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                     PRODUCER SIDE                               │
-│  - Enqueue jobs (dengan/without ETA)                           │
+│  - Enqueue jobs (with/without ETA)                           │
 │  - Jobs → ZSET (scheduled) atau LIST (regular)                 │
 └────────────────────┬────────────────────────────────────────────┘
                      │
@@ -178,7 +180,7 @@ Result: Perfect round-robin distribution!
 └─────────────────────────────────────────────────────────────┘
            ↓
 ┌─────────────────────────────────────────────────────────────┐
-│  STEP 3: Register ke Redis                                  │
+│  STEP 3: Register to Redis                                  │
 │  HSET lite-job:consumers:orders:abc-123-def-456             │
 │    uuid "abc-123-def-456"                                   │
 │    started_at 1234567890                                     │
@@ -404,7 +406,7 @@ local job = redis.call('LPOP', list_key)
 return job
 ```
 
-**Problem:** Semua consumers compete untuk LPOP yang sama!
+**Problem:** All consumers compete for the same LPOP!
 
 ### Enhanced Dequeue Script (With Modulo)
 
@@ -1015,6 +1017,6 @@ No heartbeat for 30s → Key expires → Consumer removed from registry
 
 ---
 
-**Dokumen ini menjelaskan konsep flow dari Multi-Consumer Fair Distribution.**
-**Untuk implementasi detail, lihat `IMPLEMENTATION_COMPLETE.md`**
-**Untuk design document, lihat `MULTI_CONSUMER_DESIGN.md`**
+**This document explains the Multi-Consumer Fair Distribution flow.**
+**For implementation details, see `IMPLEMENTATION_COMPLETE.md`**
+**For design document, see `MULTI_CONSUMER_DESIGN.md`**
