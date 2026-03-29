@@ -1,7 +1,7 @@
 use crate::config::RedisConfig;
 use crate::error::{JobError, JobResult};
 use crate::retry::{retry_async, RetryConfig};
-use redis::aio::ConnectionManager;
+use redis::aio::{ConnectionManager, MultiplexedConnection};
 use redis::AsyncCommands;
 use redis::Client;
 use serde::{Deserialize, Serialize};
@@ -47,10 +47,10 @@ impl RedisPubSub {
         let serialized = serde_json::to_string(message)?;
         let full_channel = self.config.make_key(channel);
         let client = self.client.clone();
-        
+
         retry_async(
             || async {
-                let mut conn = client.get_multiplexed_async_connection().await
+                let mut conn: MultiplexedConnection = client.get_multiplexed_async_connection().await
                     .map_err(JobError::from)?;
                 conn.publish(&full_channel, &serialized).await
                     .map_err(JobError::from)
@@ -59,7 +59,6 @@ impl RedisPubSub {
         ).await
     }
 
-    #[allow(deprecated)]
     pub async fn subscribe<F, T>(&self, channels: Vec<String>, callback: F) -> JobResult<()>
     where
         F: Fn(String, T) + Send + Sync + 'static,
@@ -71,25 +70,22 @@ impl RedisPubSub {
             .collect();
 
         info!("Subscribing to channels: {:?}", full_channels);
-        
+
         let client = self.client.clone();
-        let conn = retry_async(
+        let (mut sink, mut stream) = retry_async(
             || async {
-                client.get_async_connection().await
+                client.get_async_pubsub().await
                     .map_err(JobError::from)
             },
             Some(self.retry_config.clone()),
-        ).await?;
-        
-        let mut pubsub = conn.into_pubsub();
-        
+        ).await?.split();
+
         for channel in &full_channels {
-            pubsub.subscribe(channel).await?;
+            sink.subscribe(channel).await?;
         }
-        
+
         info!("Subscribed to channels: {:?}", full_channels);
-        
-        let mut stream = pubsub.on_message();
+
         while let Some(msg) = stream.next().await {
             let channel_name: String = msg.get_channel_name().to_string();
             let payload_str: String = msg.get_payload()?;
