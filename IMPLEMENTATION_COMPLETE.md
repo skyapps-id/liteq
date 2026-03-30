@@ -2,7 +2,121 @@
 
 ## Summary
 
-Successfully implemented **Self-Registration with Heartbeat** for automatic fair distribution of jobs across multiple consumer instances.
+Successfully implemented **Self-Registration with Heartbeat** for automatic fair distribution of jobs across multiple consumer instances, with **Redis auto-reconnect** and **PubSub auto-reconnect** for production resilience.
+
+## Recent Updates (2026-03-30)
+
+### 🔧 Redis Connection Management Improvements
+
+#### 1. Configurable Timeouts
+Added configurable connection and response timeouts to handle various Redis environments:
+
+**Changes:**
+- Added `connection_timeout_secs` (default: 30s)
+- Added `response_timeout_secs` (default: 20s)
+- Configured via `RedisConfig` builder methods
+
+**Usage:**
+```rust
+RedisConfig::new("redis://127.0.0.1:6379")
+    .with_connection_timeout(15)  // For faster local Redis
+    .with_response_timeout(10);
+```
+
+**For cloud Redis (Aiven, Upstash, etc.):**
+```rust
+RedisConfig::new("rediss://cloud-redis.example.com:6379")
+    .with_connection_timeout(30)  // Default, handles network latency
+    .with_response_timeout(20);
+```
+
+#### 2. ConnectionManager Integration
+All Redis operations now use `ConnectionManager` with proper timeout configuration:
+- `ConnectionManagerConfig` with 20 retries, 1-60s exponential backoff
+- Applied to queue operations, pubsub, and connection supervision
+- Prevents connection hangs and improves reliability
+
+**Files updated:**
+- `src/connection_supervisor.rs` - Test connection and reconnect logic
+- `src/pubsub.rs` - Publish operations
+- `src/queue.rs` - All queue operations (enqueue, dequeue, etc.)
+- `src/consumer_registry.rs` - Consumer registration and heartbeat
+
+#### 3. Persistent Retry with Exponential Backoff
+Connection supervisor now implements smart retry logic:
+
+**Behavior:**
+```
+Connection fails → Attempt reconnect (3 attempts with exponential backoff)
+    ↓
+Still failing? → Apply exponential backoff (1s → 2s → 4s → ... → 60s max)
+    ↓
+Every 5 seconds → Try reconnect again with backoff
+    ↓
+Redis comes back → Success! Reset counters and resume
+```
+
+**Log example:**
+```
+⚠️ Redis disconnected - starting reconnection
+⚠️ Reconnection attempt 1/3 failed: Connection refused
+⚠️ Reconnection attempt 2/3 failed: Connection refused  
+⚠️ Reconnection attempt 3/3 failed: Connection refused
+⚠️ Multiple connection failures (4), backing off for 1s
+⚠️ Reconnection attempt 5 failed: Connection refused
+⚠️ Multiple connection failures (8), backing off for 2s
+✅ Reconnection successful on attempt 9
+✅ Redis connected - notifying workers
+```
+
+### 📡 PubSub Auto-Reconnect
+
+#### Problem
+After Redis restart, PubSub consumers would stop receiving messages because the pubsub stream ends without reconnection.
+
+#### Solution
+Implemented automatic reconnection with re-subscription:
+
+**Changes:**
+- `subscribe()` now spawns a background task with reconnect loop
+- `subscribe_and_listen()` helper manages individual connection lifecycle
+- Automatic re-subscription to all channels after reconnect
+- 5-second delay between reconnect attempts
+
+**Usage:**
+```rust
+pubsub.subscribe(
+    vec!["events".to_string()],
+    |channel, msg: MyMessage| {
+        println!("Received: {:?}", msg);
+    }
+).await?;
+```
+
+**Test it:**
+```bash
+cargo run --example test_pubsub_reconnect
+# Then:
+redis-cli PUBLISH lite-job:test_channel '{"text":"Hello"}'  # ✅ Works
+redis-cli shutdown                                           # Stop Redis
+redis-server                                                  # Start Redis  
+redis-cli PUBLISH lite-job:test_channel '{"text":"Still!"}'  # ✅ Still works!
+```
+
+**Files updated:**
+- `src/pubsub.rs` - Complete rewrite of subscribe logic
+- `examples/test_pubsub_reconnect.rs` - New test example
+
+### 🧹 Code Cleanup
+
+#### Applied Clippy Fixes
+- Fixed unnecessary casts in retry.rs
+- Simplified registry.rs with `.flatten()`
+- Removed needless borrows in consumer_registry.rs
+
+#### Removed Unused Code
+- Marked `JobQueue::flush()` as `#[allow(dead_code)]` (useful but unused)
+- No public API removals (all features maintained)
 
 ## Recent Fixes (2026-03-28)
 

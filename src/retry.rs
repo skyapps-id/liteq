@@ -153,7 +153,7 @@ where
                 if is_connection_error && attempt < config.max_attempts {
                     // Add jitter to prevent thundering herd
                     let jitter = if config.jitter_ms > 0 {
-                        rand::random::<u64>() % config.jitter_ms as u64
+                        rand::random::<u64>() % config.jitter_ms
                     } else {
                         0
                     };

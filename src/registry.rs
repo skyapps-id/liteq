@@ -158,25 +158,23 @@ impl SubscriberRegistry {
 
         let results = join_all(registration_tasks).await;
 
-        for result in results {
-            if let Ok((queue_name, registration_result)) = result {
-                match registration_result {
-                    Ok(info) => {
-                        tracing::info!(
-                            queue = %queue_name,
-                            consumer_id = info.id,
-                            total_consumers = info.total,
-                            "Auto-registered consumer for queue"
-                        );
-                        consumer_infos.insert(queue_name.clone(), info);
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            error = %e,
-                            queue = %queue_name,
-                            "Failed to register consumer, will use single-consumer mode"
-                        );
-                    }
+        for (queue_name, registration_result) in results.into_iter().flatten() {
+            match registration_result {
+                Ok(info) => {
+                    tracing::info!(
+                        queue = %queue_name,
+                        consumer_id = info.id,
+                        total_consumers = info.total,
+                        "Auto-registered consumer for queue"
+                    );
+                    consumer_infos.insert(queue_name.clone(), info);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        queue = %queue_name,
+                        "Failed to register consumer, will use single-consumer mode"
+                    );
                 }
             }
         }

@@ -2,6 +2,7 @@ use crate::config::{RedisConfig, ConsumerInfo};
 use crate::error::{JobError, JobResult};
 use crate::retry::{retry_async, RetryConfig};
 use chrono::Utc;
+use redis::Client;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -27,8 +28,25 @@ impl ConsumerRegistry {
             retry_config: RetryConfig::new()
                 .with_max_attempts(5)
                 .with_initial_delay(200)
-                .with_max_delay(5000),
+                .with_max_delay(5000)
+                .with_jitter(50),
         }
+    }
+
+    /// Helper to create a ConnectionManager with proper timeout configuration
+    async fn create_connection_manager(&self) -> JobResult<redis::aio::ConnectionManager> {
+        let client = Client::open(self.redis_config.url.clone())?;
+
+        let manager_config = redis::aio::ConnectionManagerConfig::new()
+            .set_connection_timeout(Some(Duration::from_secs(self.redis_config.connection_timeout_secs)))
+            .set_response_timeout(Some(Duration::from_secs(self.redis_config.response_timeout_secs)))
+            .set_number_of_retries(20)
+            .set_min_delay(Duration::from_secs(1))
+            .set_max_delay(Duration::from_secs(60));
+
+        redis::aio::ConnectionManager::new_with_config(client, manager_config)
+            .await
+            .map_err(JobError::from)
     }
 
     /// Register this consumer and start heartbeat
@@ -43,13 +61,10 @@ impl ConsumerRegistry {
             queue_name, my_uuid
         ));
 
-        let client = redis::Client::open(self.redis_config.url.clone())?;
-
-        // Register this consumer
+        // Register this consumer using ConnectionManager
         retry_async(
             || async {
-                let mut conn = client.get_multiplexed_async_connection().await
-                    .map_err(JobError::from)?;
+                let mut conn_manager = Self::create_connection_manager(self).await?;
 
                 // Set consumer metadata
                 redis::cmd("HSET")
@@ -60,7 +75,7 @@ impl ConsumerRegistry {
                     .arg(started_at)
                     .arg("last_heartbeat")
                     .arg(started_at)
-                    .query_async::<()>(&mut conn)
+                    .query_async::<()>(&mut conn_manager)
                     .await
                     .map_err(JobError::from)?;
 
@@ -68,7 +83,7 @@ impl ConsumerRegistry {
                 redis::cmd("EXPIRE")
                     .arg(&consumer_key)
                     .arg(30)
-                    .query_async::<()>(&mut conn)
+                    .query_async::<()>(&mut conn_manager)
                     .await
                     .map_err(JobError::from)?;
 
@@ -173,39 +188,45 @@ impl ConsumerRegistry {
         queue_name: String,
         my_uuid: String,
     ) -> JobResult<()> {
-        let client = redis::Client::open(redis_config.url.clone())?;
+        let client = Client::open(redis_config.url.clone())?;
+
+        let manager_config = redis::aio::ConnectionManagerConfig::new()
+            .set_connection_timeout(Some(Duration::from_secs(redis_config.connection_timeout_secs)))
+            .set_response_timeout(Some(Duration::from_secs(redis_config.response_timeout_secs)))
+            .set_number_of_retries(20)
+            .set_min_delay(Duration::from_secs(1))
+            .set_max_delay(Duration::from_secs(60));
+
+        let mut conn_manager = redis::aio::ConnectionManager::new_with_config(client, manager_config).await?;
 
         loop {
             sleep(Duration::from_secs(10)).await;
 
-            // Refresh TTL
-            match retry_async(
-                || async {
-                    let mut conn = client.get_multiplexed_async_connection().await
-                        .map_err(JobError::from)?;
+            // Refresh TTL using ConnectionManager
+            let result = async {
+                let now = Utc::now().timestamp();
 
-                    // Update heartbeat timestamp
-                    let now = Utc::now().timestamp();
-                    redis::cmd("HSET")
-                        .arg(&consumer_key)
-                        .arg("last_heartbeat")
-                        .arg(now)
-                        .query_async::<()>(&mut conn)
-                        .await
-                        .map_err(JobError::from)?;
+                // Update heartbeat timestamp
+                redis::cmd("HSET")
+                    .arg(&consumer_key)
+                    .arg("last_heartbeat")
+                    .arg(now)
+                    .query_async::<()>(&mut conn_manager)
+                    .await
+                    .map_err(JobError::from)?;
 
-                    // Refresh TTL
-                    redis::cmd("EXPIRE")
-                        .arg(&consumer_key)
-                        .arg(30)
-                        .query_async::<()>(&mut conn)
-                        .await
-                        .map_err(JobError::from)?;
+                // Refresh TTL
+                redis::cmd("EXPIRE")
+                    .arg(&consumer_key)
+                    .arg(30)
+                    .query_async::<()>(&mut conn_manager)
+                    .await
+                    .map_err(JobError::from)?;
 
-                    Ok(())
-                },
-                None,
-            ).await {
+                Ok::<(), JobError>(())
+            }.await;
+
+            match result {
                 Ok(_) => {
                     tracing::debug!(
                         queue = %queue_name,
@@ -228,23 +249,13 @@ impl ConsumerRegistry {
     /// Query all active consumers for a queue
     pub async fn get_active_consumers(&self, queue_name: &str) -> JobResult<Vec<String>> {
         let pattern = self.redis_config.make_key(&format!("consumers:{}:*", queue_name));
-        let client = redis::Client::open(self.redis_config.url.clone())?;
 
-        let keys: Vec<String> = retry_async(
-            || async {
-                let mut conn = client.get_multiplexed_async_connection().await
-                    .map_err(JobError::from)?;
+        let mut conn_manager = self.create_connection_manager().await?;
 
-                let keys: Vec<String> = redis::cmd("KEYS")
-                    .arg(&pattern)
-                    .query_async(&mut conn)
-                    .await
-                    .map_err(JobError::from)?;
-
-                Ok(keys)
-            },
-            Some(self.retry_config.clone()),
-        ).await?;
+        let keys: Vec<String> = redis::cmd("KEYS")
+            .arg(&pattern)
+            .query_async(&mut conn_manager)
+            .await?;
 
         Ok(keys)
     }
@@ -257,26 +268,24 @@ pub async fn get_consumer_position(
     my_uuid: &str,
 ) -> JobResult<(usize, usize)> {
     let pattern = redis_config.make_key(&format!("consumers:{}:*", queue_name));
-    let client = redis::Client::open(redis_config.url.clone())?;
+    let client = Client::open(redis_config.url.clone())?;
 
     // Wait a bit for other consumers to register
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
-    let keys: Vec<String> = retry_async(
-        || async {
-            let mut conn = client.get_multiplexed_async_connection().await
-                .map_err(JobError::from)?;
+    let manager_config = redis::aio::ConnectionManagerConfig::new()
+        .set_connection_timeout(Some(Duration::from_secs(redis_config.connection_timeout_secs)))
+        .set_response_timeout(Some(Duration::from_secs(redis_config.response_timeout_secs)))
+        .set_number_of_retries(20)
+        .set_min_delay(Duration::from_secs(1))
+        .set_max_delay(Duration::from_secs(60));
 
-            let keys: Vec<String> = redis::cmd("KEYS")
-                .arg(&pattern)
-                .query_async(&mut conn)
-                .await
-                .map_err(JobError::from)?;
+    let mut conn_manager = redis::aio::ConnectionManager::new_with_config(client, manager_config).await?;
 
-            Ok(keys)
-        },
-        None,
-    ).await?;
+    let keys: Vec<String> = redis::cmd("KEYS")
+        .arg(&pattern)
+        .query_async(&mut conn_manager)
+        .await?;
 
     // Sort keys to ensure consistent ordering
     let mut sorted_keys = keys;
