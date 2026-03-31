@@ -3,9 +3,11 @@ use crate::error::{JobError, JobResult};
 use crate::job::Job;
 use crate::retry::{retry_async, RetryConfig};
 use chrono::Utc;
-use redis::{AsyncCommands, Cmd, Script};
+use redis::{AsyncCommands, Cmd, Script, Client};
+use redis::aio::ConnectionManager;
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
 
 static DEQUEUE_SCRIPT: &str = r#"
 local list_key = KEYS[1]
@@ -88,7 +90,6 @@ return nil
 pub struct JobQueue {
     config: Arc<QueueConfig>,
     redis_config: Arc<RedisConfig>,
-    client: redis::Client,
     retry_config: RetryConfig,
     dequeue_script: Script,
     dequeue_consumer_script: Script,
@@ -100,14 +101,12 @@ impl JobQueue {
         queue_config: QueueConfig,
         redis_config: RedisConfig,
     ) -> JobResult<Self> {
-        let client = redis::Client::open(redis_config.url.clone())?;
         let dequeue_script = Script::new(DEQUEUE_SCRIPT);
         let dequeue_consumer_script = Script::new(DEQUEUE_CONSUMER_SCRIPT);
 
         Ok(Self {
             config: Arc::new(queue_config),
             redis_config: Arc::new(redis_config),
-            client,
             retry_config: RetryConfig::new()
                 .with_max_attempts(10)
                 .with_initial_delay(500)
@@ -123,6 +122,22 @@ impl JobQueue {
         self
     }
 
+    /// Helper to create a ConnectionManager with proper timeout configuration
+    async fn create_connection_manager(&self) -> JobResult<ConnectionManager> {
+        let client = Client::open(self.redis_config.url.clone())?;
+
+        let manager_config = redis::aio::ConnectionManagerConfig::new()
+            .set_connection_timeout(Some(Duration::from_secs(self.redis_config.connection_timeout_secs)))
+            .set_response_timeout(Some(Duration::from_secs(self.redis_config.response_timeout_secs)))
+            .set_number_of_retries(20)
+            .set_min_delay(Duration::from_secs(1))
+            .set_max_delay(Duration::from_secs(60));
+
+        ConnectionManager::new_with_config(client, manager_config)
+            .await
+            .map_err(JobError::from)
+    }
+
     /// Adds job to queue (with ETA → ZSET, without ETA → LIST)
     pub async fn enqueue<T>(&self, job: Job<T>) -> JobResult<String>
     where
@@ -131,21 +146,19 @@ impl JobQueue {
         let job_json = job.to_json()?;
         let queue_key = self.redis_config.make_key(&format!("queue:{}", self.config.name));
         let schedule_key = self.redis_config.make_key(&format!("schedule:{}", self.config.name));
-        let client = self.client.clone();
-        
+
         let has_eta = job.eta.is_some();
-        
+
         retry_async(
             || async {
-                let mut conn = client.get_multiplexed_async_connection().await
-                    .map_err(JobError::from)?;
-                
+                let mut conn_manager = self.create_connection_manager().await?;
+
                 if has_eta {
                     let eta_timestamp = job.eta.unwrap().timestamp();
-                    conn.zadd::<_, _, _, ()>(&schedule_key, &job_json, eta_timestamp).await
+                    conn_manager.zadd::<_, _, _, ()>(&schedule_key, &job_json, eta_timestamp).await
                         .map_err(JobError::from)?;
                 } else {
-                    conn.rpush::<_, _, ()>(&queue_key, &job_json).await
+                    conn_manager.rpush::<_, _, ()>(&queue_key, &job_json).await
                         .map_err(JobError::from)?;
                 }
                 
@@ -164,19 +177,17 @@ impl JobQueue {
     {
         let queue_key = self.redis_config.make_key(&format!("queue:{}", self.config.name));
         let schedule_key = self.redis_config.make_key(&format!("schedule:{}", self.config.name));
-        let client = self.client.clone();
         let current_time = Utc::now().timestamp();
 
         let result: Option<String> = retry_async(
             || async {
-                let mut conn = client.get_multiplexed_async_connection().await
-                    .map_err(JobError::from)?;
+                let mut conn_manager = self.create_connection_manager().await?;
 
                 let job_json: Option<String> = self.dequeue_script
                     .key(&queue_key)
                     .key(&schedule_key)
                     .arg(current_time)
-                    .invoke_async(&mut conn)
+                    .invoke_async(&mut conn_manager)
                     .await
                     .map_err(JobError::from)?;
 
@@ -202,13 +213,11 @@ impl JobQueue {
         let queue_key = self.redis_config.make_key(&format!("queue:{}", self.config.name));
         let schedule_key = self.redis_config.make_key(&format!("schedule:{}", self.config.name));
         let meta_key = self.redis_config.make_key(&format!("{}:meta", self.config.name));
-        let client = self.client.clone();
         let current_time = Utc::now().timestamp();
 
         let result: Option<String> = retry_async(
             || async {
-                let mut conn = client.get_multiplexed_async_connection().await
-                    .map_err(JobError::from)?;
+                let mut conn_manager = self.create_connection_manager().await?;
 
                 let job_json: Option<String> = self.dequeue_consumer_script
                     .key(&queue_key)
@@ -217,7 +226,7 @@ impl JobQueue {
                     .arg(current_time)
                     .arg(consumer_info.id)
                     .arg(consumer_info.total)
-                    .invoke_async(&mut conn)
+                    .invoke_async(&mut conn_manager)
                     .await
                     .map_err(JobError::from)?;
 
@@ -247,16 +256,14 @@ impl JobQueue {
     pub async fn get_job_counts(&self) -> JobResult<(usize, usize)> {
         let queue_key = self.redis_config.make_key(&format!("queue:{}", self.config.name));
         let schedule_key = self.redis_config.make_key(&format!("schedule:{}", self.config.name));
-        let client = self.client.clone();
 
         let (regular_count, scheduled_count): (usize, usize) = retry_async(
             || async {
-                let mut conn = client.get_multiplexed_async_connection().await
-                    .map_err(JobError::from)?;
+                let mut conn_manager = self.create_connection_manager().await?;
 
-                let regular: usize = conn.llen(&queue_key).await
+                let regular: usize = conn_manager.llen(&queue_key).await
                     .map_err(JobError::from)?;
-                let scheduled: usize = conn.zcard(&schedule_key).await
+                let scheduled: usize = conn_manager.zcard(&schedule_key).await
                     .map_err(JobError::from)?;
 
                 Ok((regular, scheduled))
@@ -278,25 +285,23 @@ impl JobQueue {
 
         let queue_key = self.redis_config.make_key(&format!("queue:{}", self.config.name));
         let schedule_key = self.redis_config.make_key(&format!("schedule:{}", self.config.name));
-        let client = self.client.clone();
         let current_time = Utc::now().timestamp();
 
         let jobs = retry_async(
             || async {
-                let mut conn = client.get_multiplexed_async_connection().await
-                    .map_err(JobError::from)?;
+                let mut conn_manager = self.create_connection_manager().await?;
 
                 let mut result = Vec::new();
 
                 // First, try to get ready scheduled jobs (up to batch_size)
-                let ready_jobs: Vec<String> = conn
+                let ready_jobs: Vec<String> = conn_manager
                     .zrangebyscore_limit(&schedule_key, "-inf", current_time, 0, batch_size as isize)
                     .await
                     .map_err(JobError::from)?;
 
                 for job_json in ready_jobs {
                     // Atomic ZREM to ensure no race condition
-                    let removed: i32 = conn.zrem(&schedule_key, &job_json).await
+                    let removed: i32 = conn_manager.zrem(&schedule_key, &job_json).await
                         .map_err(JobError::from)?;
 
                     if removed > 0 {
@@ -312,7 +317,7 @@ impl JobQueue {
 
                 // If we haven't filled the batch, get regular jobs
                 while result.len() < batch_size {
-                    let job_json: Option<String> = conn.lpop(&queue_key, None).await
+                    let job_json: Option<String> = conn_manager.lpop(&queue_key, None).await
                         .map_err(JobError::from)?;
 
                     match job_json {
@@ -334,18 +339,17 @@ impl JobQueue {
     }
 
     /// Deletes all jobs (cannot be undone!)
+    #[allow(dead_code)]
     pub async fn flush(&self) -> JobResult<()> {
         let queue_key = self.redis_config.make_key(&format!("queue:{}", self.config.name));
         let schedule_key = self.redis_config.make_key(&format!("schedule:{}", self.config.name));
-        let client = self.client.clone();
 
         retry_async(
             || async {
-                let mut conn = client.get_multiplexed_async_connection().await
-                    .map_err(JobError::from)?;
+                let mut conn_manager = self.create_connection_manager().await?;
 
                 // Delete both LIST and ZSET
-                conn.del::<_, ()>(&[&queue_key, &schedule_key]).await
+                conn_manager.del::<_, ()>(&[&queue_key, &schedule_key]).await
                     .map_err(JobError::from)?;
 
                 Ok(())
@@ -371,26 +375,35 @@ impl JobQueue {
     /// Lists all queue names in Redis
     pub async fn list_all(config: &RedisConfig) -> JobResult<Vec<String>> {
         let client = redis::Client::open(config.url.clone())?;
-        let mut conn = client.get_multiplexed_async_connection().await
+
+        let manager_config = redis::aio::ConnectionManagerConfig::new()
+            .set_connection_timeout(Some(Duration::from_secs(config.connection_timeout_secs)))
+            .set_response_timeout(Some(Duration::from_secs(config.response_timeout_secs)))
+            .set_number_of_retries(20)
+            .set_min_delay(Duration::from_secs(1))
+            .set_max_delay(Duration::from_secs(60));
+
+        let mut conn_manager = redis::aio::ConnectionManager::new_with_config(client, manager_config)
+            .await
             .map_err(JobError::from)?;
-        
+
         // Get all queue keys (LIST)
         let queue_pattern = format!("{}:*queue:*", config.key_prefix);
         let queue_keys: Vec<String> = Cmd::keys(&queue_pattern)
-            .query_async(&mut conn)
+            .query_async(&mut conn_manager)
             .await
             .map_err(JobError::from)?;
-        
+
         // Get all schedule keys (ZSET)
         let schedule_pattern = format!("{}:*schedule:*", config.key_prefix);
         let schedule_keys: Vec<String> = Cmd::keys(&schedule_pattern)
-            .query_async(&mut conn)
+            .query_async(&mut conn_manager)
             .await
             .map_err(JobError::from)?;
-        
+
         // Extract queue names from keys
         let mut queue_names = HashSet::new();
-        
+
         for key in queue_keys {
             // Format: {prefix}:queue:{queue_name}
             if let Some(rest) = key.strip_prefix(&format!("{}:queue:", config.key_prefix)) {

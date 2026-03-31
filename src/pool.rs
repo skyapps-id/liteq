@@ -2,7 +2,7 @@ use crate::config::RedisConfig;
 use crate::connection_supervisor::ConnectionSupervisor;
 use crate::error::JobResult;
 use crate::metrics::{MetricsRegistry, PoolStatus};
-use deadpool_redis::Connection;
+use redis::aio::ConnectionManager;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -44,7 +44,7 @@ impl RedisPool {
     }
 
     /// Gets connection with automatic metrics tracking
-    pub async fn get_connection(&self) -> JobResult<Connection> {
+    pub async fn get_connection(&self) -> JobResult<ConnectionManager> {
         let start = Instant::now();
         let result = self.supervisor.get_connection().await;
         let latency = start.elapsed().as_millis() as f64;

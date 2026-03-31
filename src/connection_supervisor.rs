@@ -1,8 +1,9 @@
 use crate::config::RedisConfig;
 use crate::error::{JobError, JobResult};
 use crate::retry::RetryConfig;
-use deadpool_redis::Connection;
+use redis::aio::{ConnectionManager, ConnectionManagerConfig};
 use redis::cmd;
+use redis::Client;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Notify, RwLock};
@@ -46,9 +47,16 @@ impl ConnectionSupervisor {
         let check_interval = self.check_interval;
 
         tokio::spawn(async move {
-            Self::supervision_loop(state, ready_notify, config, retry_config, check_interval).await
+            Self::supervision_loop(
+                state,
+                ready_notify,
+                config,
+                retry_config,
+                check_interval,
+            ).await;
         });
 
+        info!("Connection supervision started");
         Ok(())
     }
 
@@ -64,17 +72,22 @@ impl ConnectionSupervisor {
         }
     }
 
-    pub async fn get_connection(&self) -> JobResult<Connection> {
+    pub async fn get_connection(&self) -> JobResult<ConnectionManager> {
         self.wait_ready().await?;
 
-        let cfg = deadpool_redis::Config::from_url(&self.config.url);
-        let pool = cfg
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .map_err(|e| JobError::InvalidConfig(format!("Failed to create pool: {}", e)))?;
+        let client = Client::open(self.config.url.as_str())
+            .map_err(|e| JobError::InvalidConfig(format!("Failed to create Redis client: {}", e)))?;
 
-        pool.get()
+        let manager_config = ConnectionManagerConfig::new()
+            .set_connection_timeout(Some(Duration::from_secs(self.config.connection_timeout_secs)))
+            .set_response_timeout(Some(Duration::from_secs(self.config.response_timeout_secs)))
+            .set_number_of_retries(20)
+            .set_min_delay(Duration::from_secs(1))
+            .set_max_delay(Duration::from_secs(60));
+
+        ConnectionManager::new_with_config(client, manager_config)
             .await
-            .map_err(|e| JobError::PoolExhausted(e.to_string()))
+            .map_err(JobError::from)
     }
 
     async fn supervision_loop(
@@ -85,7 +98,6 @@ impl ConnectionSupervisor {
         check_interval: Duration,
     ) {
         let mut consecutive_failures = 0u32;
-        let max_failures_before_backoff = 5u32;
         let mut backoff_duration = Duration::from_secs(1);
 
         loop {
@@ -97,9 +109,10 @@ impl ConnectionSupervisor {
                         info!("Redis connected - notifying workers");
                         *state.write().await = ConnectionState::Connected;
                         ready_notify.notify_waiters();
-                        consecutive_failures = 0;
-                        backoff_duration = Duration::from_secs(1);
                     }
+                    // Reset counters on success
+                    consecutive_failures = 0;
+                    backoff_duration = Duration::from_secs(1);
                 }
                 Err(_e) => {
                     consecutive_failures += 1;
@@ -109,28 +122,34 @@ impl ConnectionSupervisor {
                         *state.write().await = ConnectionState::Disconnected;
                     }
 
-                    // Apply backoff if failing repeatedly
-                    if consecutive_failures > max_failures_before_backoff {
-                        let backoff_secs = backoff_duration.as_secs();
-                        warn!("Multiple failures detected - backing off for {}s", backoff_secs);
-                        sleep(backoff_duration).await;
-                        backoff_duration = std::cmp::min(
-                            backoff_duration * 2,
-                            Duration::from_secs(60)
+                    // Apply exponential backoff after 3 failures
+                    if consecutive_failures > 3 {
+                        warn!(
+                            "Multiple connection failures ({}) - backing off for {:?} before retry",
+                            consecutive_failures, backoff_duration
                         );
-                    } else {
-                        // Attempt reconnection with retry logic
-                        match Self::reconnect(&config, &retry_config).await {
-                            Ok(_) => {
-                                info!("Redis reconnected successfully");
-                                *state.write().await = ConnectionState::Connected;
-                                ready_notify.notify_waiters();
-                                consecutive_failures = 0;
-                                backoff_duration = Duration::from_secs(1);
-                            }
-                            Err(reconnect_err) => {
-                                error!("Reconnection failed: {}", reconnect_err);
-                            }
+                        sleep(backoff_duration).await;
+                        // Increase backof for next time (exponential, max 60s)
+                        backoff_duration = std::cmp::min(backoff_duration * 2, Duration::from_secs(60));
+                    }
+
+                    // Try reconnection with configured retry logic
+                    match Self::attempt_reconnect(&config, &retry_config).await {
+                        Ok(_) => {
+                            info!(
+                                "Reconnection successful after {} failures",
+                                consecutive_failures
+                            );
+                            *state.write().await = ConnectionState::Connected;
+                            ready_notify.notify_waiters();
+                            consecutive_failures = 0;
+                            backoff_duration = Duration::from_secs(1);
+                        }
+                        Err(reconnect_err) => {
+                            error!(
+                                "Reconnection attempt {} failed: {}",
+                                consecutive_failures, reconnect_err
+                            );
                         }
                     }
                 }
@@ -142,20 +161,27 @@ impl ConnectionSupervisor {
 
     async fn test_connection(config: &RedisConfig) -> JobResult<()> {
         let client = redis::Client::open(config.url.clone())?;
-        let mut conn = client
-            .get_multiplexed_async_connection()
+
+        let manager_config = ConnectionManagerConfig::new()
+            .set_connection_timeout(Some(Duration::from_secs(config.connection_timeout_secs)))
+            .set_response_timeout(Some(Duration::from_secs(config.response_timeout_secs)))
+            .set_number_of_retries(5)
+            .set_min_delay(Duration::from_millis(500))
+            .set_max_delay(Duration::from_secs(5));
+
+        let mut conn_manager = ConnectionManager::new_with_config(client, manager_config)
             .await
             .map_err(JobError::from)?;
 
         cmd("PING")
-            .query_async::<String>(&mut conn)
+            .query_async::<String>(&mut conn_manager)
             .await
             .map_err(JobError::from)?;
         Ok(())
     }
 
-    async fn reconnect(config: &RedisConfig, retry_config: &RetryConfig) -> JobResult<()> {
-        let max_attempts = retry_config.max_attempts;
+    async fn attempt_reconnect(config: &RedisConfig, retry_config: &RetryConfig) -> JobResult<()> {
+        let max_attempts = 3; // Limit attempts since supervision_loop will keep retrying
         let initial_delay = Duration::from_millis(retry_config.initial_delay_ms);
         let mut current_delay = initial_delay;
 
@@ -182,7 +208,7 @@ impl ConnectionSupervisor {
                             ),
                         );
                     } else {
-                        error!("Reconnection failed after {} attempts", attempt);
+                        error!("Reconnection failed after {} attempts: {}", attempt, e);
                         return Err(e);
                     }
                 }

@@ -21,7 +21,4 @@ pub enum JobError {
 
     #[error("Pool exhausted: {0}")]
     PoolExhausted(String),
-
-    #[error("Pool error: {0}")]
-    PoolError(#[from] deadpool::managed::PoolError<redis::RedisError>),
 }

@@ -1,12 +1,12 @@
 use crate::config::RedisConfig;
 use crate::error::{JobError, JobResult};
 use crate::retry::{retry_async, RetryConfig};
-use redis::aio::ConnectionManager;
 use redis::AsyncCommands;
 use redis::Client;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tracing::{debug, error, info};
+use std::time::Duration;
+use tracing::{debug, error, info, warn};
 use futures_util::StreamExt;
 
 #[derive(Clone)]
@@ -19,19 +19,16 @@ pub struct RedisPubSub {
 impl RedisPubSub {
     pub async fn new(config: RedisConfig) -> JobResult<Self> {
         let client = redis::Client::open(config.url.clone())?;
-        let conn = ConnectionManager::new(client.clone()).await?;
-        
-        info!("Redis PubSub connected to {}", config.url);
-        
-        drop(conn);
-        
+
+        info!("Redis PubSub created for {}", config.url);
+
         Ok(Self {
             config: Arc::new(config),
             client: Arc::new(client),
             retry_config: RetryConfig::new()
-                .with_max_attempts(10)
-                .with_initial_delay(500)
-                .with_max_delay(30000),
+                .with_max_attempts(20)
+                .with_initial_delay(1000)
+                .with_max_delay(60000),
         })
     }
 
@@ -46,20 +43,24 @@ impl RedisPubSub {
     {
         let serialized = serde_json::to_string(message)?;
         let full_channel = self.config.make_key(channel);
-        let client = self.client.clone();
-        
+
+        info!("Publishing to channel: {} with payload: {}", full_channel, serialized);
+
         retry_async(
             || async {
-                let mut conn = client.get_multiplexed_async_connection().await
+                // Use regular async connection for publish, not ConnectionManager
+                // ConnectionManager uses MULTI/EXEC pipeline which isn't ideal for PUBSUB
+                let mut conn = self.client.get_multiplexed_async_connection().await
                     .map_err(JobError::from)?;
-                conn.publish(&full_channel, &serialized).await
-                    .map_err(JobError::from)
+                let result = conn.publish(&full_channel, &serialized).await
+                    .map_err(JobError::from)?;
+                debug!("Published to {} subscribers on channel {}", result, full_channel);
+                Ok(result)
             },
             Some(self.retry_config.clone()),
         ).await
     }
 
-    #[allow(deprecated)]
     pub async fn subscribe<F, T>(&self, channels: Vec<String>, callback: F) -> JobResult<()>
     where
         F: Fn(String, T) + Send + Sync + 'static,
@@ -71,41 +72,99 @@ impl RedisPubSub {
             .collect();
 
         info!("Subscribing to channels: {:?}", full_channels);
-        
+
         let client = self.client.clone();
-        let conn = retry_async(
+        let retry_config = self.retry_config.clone();
+        let callback_arc = Arc::new(callback);
+
+        // Spawn a task that will auto-reconnect on connection loss
+        tokio::spawn(async move {
+            let mut reconnect_count = 0u32;
+
+            loop {
+                match Self::subscribe_and_listen(
+                    client.clone(),
+                    &full_channels,
+                    callback_arc.clone(),
+                    retry_config.clone(),
+                    reconnect_count,
+                ).await {
+                    Ok(_) => {
+                        info!("Subscribe stream ended gracefully");
+                        break;
+                    }
+                    Err(e) => {
+                        reconnect_count += 1;
+                        warn!(
+                            "Subscribe connection lost (attempt {}): {}. Reconnecting in 5s...",
+                            reconnect_count, e
+                        );
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                    }
+                }
+            }
+        });
+
+        Ok(())
+    }
+
+    async fn subscribe_and_listen<F, T>(
+        client: Arc<Client>,
+        channels: &[String],
+        callback: Arc<F>,
+        retry_config: RetryConfig,
+        reconnect_count: u32,
+    ) -> JobResult<()>
+    where
+        F: Fn(String, T) + Send + Sync + 'static,
+        T: for<'de> Deserialize<'de> + Send + 'static,
+    {
+        info!("Establishing pubsub connection (reconnect #{})", reconnect_count);
+
+        let mut pubsub = retry_async(
             || async {
-                client.get_async_connection().await
+                client.get_async_pubsub().await
                     .map_err(JobError::from)
             },
-            Some(self.retry_config.clone()),
+            Some(retry_config),
         ).await?;
-        
-        let mut pubsub = conn.into_pubsub();
-        
-        for channel in &full_channels {
+
+        // Re-subscribe to all channels
+        for channel in channels {
+            info!("Subscribing to channel: {}", channel);
             pubsub.subscribe(channel).await?;
         }
-        
-        info!("Subscribed to channels: {:?}", full_channels);
-        
+
+        info!("Successfully subscribed to channels: {:?}", channels);
+
+        // Listen for messages
         let mut stream = pubsub.on_message();
         while let Some(msg) = stream.next().await {
             let channel_name: String = msg.get_channel_name().to_string();
-            let payload_str: String = msg.get_payload()?;
-            
-            match serde_json::from_str::<T>(&payload_str) {
-                Ok(deserialized) => {
-                    debug!("Received message from channel: {}", channel_name);
-                    callback(channel_name, deserialized);
+
+            match msg.get_payload::<String>() {
+                Ok(payload_str) => {
+                    info!("Raw payload from {}: {}", channel_name, payload_str);
+
+                    match serde_json::from_str::<T>(&payload_str) {
+                        Ok(deserialized) => {
+                            info!("Successfully deserialized message from channel: {}", channel_name);
+                            callback(channel_name, deserialized);
+                        }
+                        Err(e) => {
+                            error!("Failed to deserialize message from {}: {}. Payload: {}", channel_name, e, payload_str);
+                        }
+                    }
                 }
                 Err(e) => {
-                    error!("Failed to deserialize message: {}", e);
+                    // Some messages (like subscribe confirmations) don't have payloads
+                    debug!("Message from {} has no payload: {:?}", channel_name, e);
                 }
             }
         }
-        
-        Ok(())
+
+        warn!("PubSub stream ended");
+        Err(JobError::QueueError("PubSub connection lost".to_string()))
     }
 }
 

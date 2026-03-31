@@ -1,6 +1,6 @@
 [package]
 name = "liteq"
-version = "1.0.1"
+version = "1.1.0"
 edition = "2021"
 description = "High-performance job queue library for Rust using Redis with auto-retry, connection pooling, and multi-consumer fair distribution"
 license = "MIT"
@@ -9,15 +9,13 @@ keywords = ["redis", "queue", "job", "async", "tokio"]
 categories = ["asynchronous", "database"]
 
 [dependencies]
-redis = { version = "0.29", features = ["aio", "tokio-comp", "connection-manager", "cluster", "json", "tokio-native-tls-comp"] }
-deadpool = "0.13.0"
-deadpool-redis = "0.23.0"
+redis = { version = "1.1", features = ["aio", "tokio-comp", "connection-manager", "cluster", "json", "tls-native-tls", "tokio-native-tls-comp"] }
 tokio-native-tls = "0.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1.40", features = ["full"] }
 chrono = { version = "0.4", features = ["serde"] }
-thiserror = "1.0"
+thiserror = "2.0.18"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 anyhow = "1.0"

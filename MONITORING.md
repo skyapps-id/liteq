@@ -460,3 +460,104 @@ These monitoring features enable:
 - ✅ Capacity planning
 
 For more examples, see `examples/monitoring_demo.rs`.
+
+---
+
+## Production Resilience
+
+### Handling Redis Downtime
+
+liteq is designed to be **resilient to Redis failures**:
+
+1. **Connection Supervisor**
+   - Continues retrying with exponential backoff
+   - Workers wait for "ready" signal
+   - Auto-recovers when Redis comes back
+   - Clean logs (no retry spam)
+
+2. **PubSub Auto-Reconnect**
+   - Automatically reconnects after connection loss
+   - Re-subscribes to all channels
+   - Messages resume after reconnect
+
+3. **Timeout Configuration**
+   - Connection timeout: 30s (configurable)
+   - Response timeout: 20s (configurable)
+   - Prevents hangs on slow networks
+
+**Monitoring Redis Downtime:**
+
+```bash
+# Check connection state
+let state = pool.supervisor().state().await;
+println!("Redis state: {:?}", state); // Connected/Disconnected
+
+# Watch logs for:
+# - "Redis disconnected - starting reconnection"
+# - "Multiple connection failures (X), backing off for Xs"
+# - "Reconnection successful on attempt X"
+# - "Redis connected - notifying workers"
+```
+
+**Example logs during Redis restart:**
+```
+⚠️ Redis disconnected - starting reconnection
+⚠️ Multiple connection failures (4), backing off for 1s
+⚠️ Reconnection attempt 5 failed: Connection refused
+⚠️ Multiple connection failures (8), backing off for 2s
+✅ Reconnection successful on attempt 9
+✅ Redis connected - notifying workers
+```
+
+### Recommended Production Settings
+
+**For cloud Redis (Aiven, Upstash, AWS ElastiCache):**
+```rust
+RedisConfig::new("rediss://your-redis.cloud.com:6379")
+    .with_connection_timeout(30)  // Handle network latency
+    .with_response_timeout(20);   // Handle slow operations
+```
+
+**For local Redis:**
+```rust
+RedisConfig::new("redis://127.0.0.1:6379")
+    .with_connection_timeout(5)   // Faster for local
+    .with_response_timeout(3);
+```
+
+**For high-latency networks:**
+```rust
+RedisConfig::new("redis://remote-redis.example.com:6379")
+    .with_connection_timeout(60)  // Longer timeout
+    .with_response_timeout(45);
+```
+
+### Health Checks in Production
+
+**Regular health monitoring:**
+```rust
+tokio::spawn(async move {
+    loop {
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        
+        for queue in ["orders", "logs"] {
+            let health = registry.health_check(queue).await?;
+            match health.status {
+                HealthStatus::Healthy => println!("✅ {} is healthy", queue),
+                HealthStatus::Degraded => println!("⚠️ {} is degraded", queue),
+                HealthStatus::Unhealthy => println!("❌ {} is unhealthy", queue),
+            }
+        }
+    }
+});
+```
+
+**Alert on consecutive failures:**
+```rust
+// Monitor reconnect attempts
+if reconnect_count > 10 {
+    // Send alert: Redis might be down
+    alert_service.send("Redis connection unstable").await?;
+}
+```
+

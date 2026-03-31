@@ -6,6 +6,8 @@ pub struct RedisConfig {
     pub pool_size: usize,
     pub min_idle: usize,
     pub key_prefix: String,
+    pub connection_timeout_secs: u64,
+    pub response_timeout_secs: u64,
 }
 
 impl RedisConfig {
@@ -15,7 +17,19 @@ impl RedisConfig {
             pool_size: 20,
             min_idle: 2,
             key_prefix: "lite-job".to_string(),
+            connection_timeout_secs: 30,
+            response_timeout_secs: 20,
         }
+    }
+
+    pub fn with_connection_timeout(mut self, secs: u64) -> Self {
+        self.connection_timeout_secs = secs;
+        self
+    }
+
+    pub fn with_response_timeout(mut self, secs: u64) -> Self {
+        self.response_timeout_secs = secs;
+        self
     }
 
     pub fn with_pool_size(mut self, size: usize) -> Self {

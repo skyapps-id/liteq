@@ -8,6 +8,8 @@ High-performance job queue library for Rust using Redis with auto-retry, connect
 - **⚡ Auto-Scaling**: Multi-consumer fair distribution with auto-registration and heartbeat
 - **🔄 Auto-Retry**: Automatic retry with exponential backoff when Redis connection fails
 - **🛡️ Resilient**: RabbitMQ-style connection supervisor - continues working even when Redis is temporarily down
+- **🔌 Persistent Connections**: ConnectionManager with configurable timeouts (30s connection, 20s response)
+- **📡 PubSub Auto-Reconnect**: Redis PubSub consumers automatically reconnect after connection loss
 - **💉 Dependency Injection**: Built-in support for injecting shared state into job handlers via `.data()`
 - **📊 Monitoring**: Health checks, job counts, and queue statistics
 - **📝 Structured Logging**: Uses `tracing` for structured, production-ready logging
@@ -28,6 +30,35 @@ serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 chrono = "0.4"
+```
+
+## Tested Environments
+
+✅ **Production-Tested** with multiple Redis providers:
+
+| Provider | Type | Status | Notes |
+|----------|------|--------|-------|
+| **Self-hosted** | Redis 7.x | ✅ Fully tested | Local & Docker deployments |
+| **Upstash** | Redis Cloud | ✅ Fully tested | Recommended for serverless |
+| **Aiven** | Valkey 7.x | ✅ Fully tested | Use default 30s/20s timeouts |
+
+**Configuration Recommendations:**
+
+```rust
+// Self-hosted Redis (local/Docker)
+RedisConfig::new("redis://127.0.0.1:6379")
+    .with_connection_timeout(5)
+    .with_response_timeout(3);
+
+// Upstash (Redis Cloud)
+RedisConfig::new("rediss://default:password@your-redis.upstash.io:6379")
+    .with_connection_timeout(30)  // Default, works well
+    .with_response_timeout(20);
+
+// Aiven Valkey (Redis-compatible)
+RedisConfig::new("rediss://user:pass@aiven-valkey.aivencloud.com:6379")
+    .with_connection_timeout(30)  // Default, optimized for cloud
+    .with_response_timeout(20);
 ```
 
 ## Quick Start
@@ -173,6 +204,55 @@ queue.enqueue(job).await?;
 
 For details, see [PERFORMANCE_IMPROVEMENTS.md](PERFORMANCE_IMPROVEMENTS.md)
 
+## Redis PubSub with Auto-Reconnect
+
+**Publish/Subscribe messaging that survives Redis restarts!**
+
+```rust
+use liteq::{RedisPubSub, RedisConfig};
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Event {
+    message: String,
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let config = RedisConfig::new("redis://127.0.0.1:6379");
+    let pubsub = RedisPubSub::new(config).await?;
+
+    // Subscribe with auto-reconnect on connection loss
+    pubsub.subscribe(
+        vec!["events".to_string()],
+        |channel, event: Event| {
+            println!("Received on {}: {:?}", channel, event);
+        }
+    ).await?;
+
+    Ok(())
+}
+```
+
+**Features:**
+- ✅ **Auto-Reconnect**: Automatically reconnects after Redis disconnect (5s delay)
+- ✅ **Auto Re-Subscribe**: Re-subscribes to all channels after reconnection
+- ✅ **Persistent**: Continues trying to reconnect until successful
+- ✅ **Non-Blocking**: Runs in background task, returns immediately
+- ✅ **Type-Safe**: Generic types with automatic deserialization
+
+**Run PubSub reconnect test:**
+```bash
+# Terminal 1: Start subscriber
+cargo run --example test_pubsub_reconnect
+
+# Terminal 2: Test auto-reconnect
+redis-cli PUBLISH lite-job:test_channel '{"text":"Hello"}'
+redis-cli shutdown  # Stop Redis
+redis-server      # Start Redis
+redis-cli PUBLISH lite-job:test_channel '{"text":"Still works!"}'  # ✅ Consumer receives it!
+```
+
 ## Health Checks & Monitoring
 
 **Monitor queue health and job counts in real-time:**
@@ -220,16 +300,37 @@ The `data` is passed as `Arc<T>` to your handler function, making it easy to sha
 The library automatically handles Redis connection failures with RabbitMQ-style supervision:
 
 **Features:**
-- ✅ **Single Retry Loop**: Only 1 retry log (not N×workers)
-- ✅ **Worker Coordination**: Workers wait for "ready" signal
-- ✅ **Clean Logs**: No retry spam during Redis downtime
-- ✅ **Auto-Recovery**: Single reconnection attempt, all workers notified
+- ✅ **Persistent Retry**: Continues retrying until Redis comes back (20 retries with exponential backoff)
+- ✅ **Configurable Timeouts**: 30s connection timeout, 20s response timeout (prevents hangs)
+- ✅ **Worker Coordination**: Workers wait for "ready" signal before processing
+- ✅ **Clean Logs**: Single reconnection log (not N×workers spamming)
+- ✅ **Auto-Recovery**: Reconnect → all workers notified simultaneously
+- ✅ **Exponential Backoff**: Smart backoff after failures (1s → 60s max)
 
-**Default retry settings:**
-- **Max Attempts**: 20 retries
-- **Initial Delay**: 500ms
-- **Max Delay**: 30 seconds
-- **Backoff**: 2x exponential
+**Default connection settings:**
+- **Connection Timeout**: 30 seconds (time to establish connection)
+- **Response Timeout**: 20 seconds (time for Redis operations)
+- **Max Retries**: 20 attempts
+- **Retry Delay**: 1s initial, up to 60s (exponential backoff)
+- **Check Interval**: 5 seconds (health check frequency)
+
+**Customize timeouts:**
+```rust
+RedisConfig::new("redis://127.0.0.1:6379")
+    .with_connection_timeout(15)  // 15 seconds
+    .with_response_timeout(10);   // 10 seconds
+```
+
+**What happens when Redis goes down:**
+```
+Redis Disconnect → Detection (5s)
+    ↓
+Attempt Reconnect (with exponential backoff)
+    ↓
+Redis Reconnect → Notify all workers
+    ↓
+Resume normal operations ✅
+```
 
 ## Builder Pattern
 
@@ -268,6 +369,9 @@ cargo run --example queue_consumer
 
 # Monitor queue stats
 cargo run --example monitoring_demo orders
+
+# Test PubSub auto-reconnect
+cargo run --example test_pubsub_reconnect
 ```
 
 **Testing Multiple Instances:**
@@ -284,35 +388,58 @@ cargo run --example queue_producer
 
 You'll see fair 50:50 distribution! 🎯
 
+**Testing Redis Reconnect:**
+```bash
+# Terminal 1: Run consumer
+cargo run --example queue_consumer
+
+# Terminal 2: Stop Redis
+redis-cli shutdown
+
+# Terminal 3: Watch auto-reconnect logs
+# Will show: "Reconnection successful after X failures"
+
+# Terminal 2: Start Redis
+redis-server
+
+# Terminal 1: Consumer resumes automatically ✅
+```
+
 ## Architecture
 
 - **ZSET**: Scheduled jobs with ETA (score = timestamp)
 - **LIST**: Regular jobs (FIFO)
-- **Connection Pooling**: Each queue has its own pool with configurable size
-- **Connection Supervisor**: RabbitMQ-style supervision per pool
+- **ConnectionManager**: Persistent connections with auto-reconnect and configurable timeouts
+- **Connection Supervisor**: RabbitMQ-style supervision with exponential backoff retry
+- **PubSub Auto-Reconnect**: Automatic reconnection and re-subscription on connection loss
 - **Worker Management**: Multiple workers per queue with configurable concurrency
 - **Multi-Consumer**: Auto-registration with heartbeat for fair distribution
-- **Retry Logic**: Exponential backoff with configurable attempts
+- **Retry Logic**: Exponential backoff with configurable attempts and jitter
 - **Structured Logging**: All operations logged with tracing
 - **Dependency Injection**: Per-queue shared state via `.data()`
 
 ## Benefits
 
-🚀 **High Performance** - ZSET optimization reduces roundtrips by 50%  
-⚡ **Auto-Scaling** - Multi-consumer fair distribution with zero config  
-🔄 **Resilient** - Survives Redis restarts with automatic reconnection  
-📊 **Observable** - Health checks and monitoring with tracing  
-🎯 **Flexible** - Configure per-queue pool sizes and worker counts  
-🔒 **Type Safe** - Full type safety with generics and Arc<T> for shared state  
+🚀 **High Performance** - ZSET optimization reduces roundtrips by 50%
+⚡ **Auto-Scaling** - Multi-consumer fair distribution with zero config
+🔄 **Resilient** - Survives Redis restarts with automatic reconnection
+🔌 **Persistent** - ConnectionManager with 30s/20s timeouts prevents connection hangs
+📡 **Reactive** - PubSub consumers auto-reconnect and resume after Redis restarts
+📊 **Observable** - Health checks and monitoring with tracing
+🎯 **Flexible** - Configure per-queue pool sizes, worker counts, and timeouts
+🔒 **Type Safe** - Full type safety with generics and Arc<T> for shared state
 💾 **Persistent** - Jobs stored in Redis even if consumer is down  
 
 ## Documentation
 
+- [CHANGELOG.md](CHANGELOG.md) - Version history and changes
 - [README.md](README.md) - Getting started guide
+- [PRODUCTION_DEPLOYMENT.md](PRODUCTION_DEPLOYMENT.md) - Production deployment with Upstash, Aiven Valkey
 - [MULTI_CONSUMER_FLOW.md](MULTI_CONSUMER_FLOW.md) - Multi-consumer fair distribution
 - [PERFORMANCE_IMPROVEMENTS.md](PERFORMANCE_IMPROVEMENTS.md) - ZSET optimization details
 - [MONITORING.md](MONITORING.md) - Health checks and monitoring guide
 - [CONNECTION_SUPERVISION.md](CONNECTION_SUPERVISION.md) - Connection supervision details
+- [PUBSUB_AUTORECONNECT.md](PUBSUB_AUTORECONNECT.md) - PubSub auto-reconnect feature
 - [IMPLEMENTATION_COMPLETE.md](IMPLEMENTATION_COMPLETE.md) - Implementation details
 
 ## License
