@@ -23,7 +23,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-liteq = "1.0"
+liteq = "1.1"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -66,7 +66,7 @@ RedisConfig::new("rediss://user:pass@aiven-valkey.aivencloud.com:6379")
 ### Producer (Send Jobs with ETA Scheduling)
 
 ```rust
-use liteq::{Job, JobQueue, QueueConfig, RedisConfig};
+use liteq::{JobQueue, QueueConfig, RedisConfig};
 use chrono::Utc;
 
 #[tokio::main]
@@ -77,18 +77,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ).await?;
 
     // Regular job (process immediately)
-    let job = Job::new(
-        serde_json::json!({"order_id": 123, "item": "widget"}),
-        "orders"
-    );
-    queue.enqueue(job).await?;
+    queue.enqueue(
+        serde_json::json!({"order_id": 123, "item": "widget"})
+    ).send().await?;
 
     // Scheduled job (process in 2 hours)
-    let scheduled_job = Job::new(
-        serde_json::json!({"order_id": 124, "item": "widget"}),
-        "orders"
-    ).with_eta(Utc::now() + chrono::Duration::hours(2));
-    queue.enqueue(scheduled_job).await?;
+    queue.enqueue(
+        serde_json::json!({"order_id": 124, "item": "widget"})
+    ).with_eta(Utc::now() + chrono::Duration::hours(2))
+    .send().await?;
 
     Ok(())
 }
@@ -186,9 +183,9 @@ For details, see [MULTI_CONSUMER_FLOW.md](MULTI_CONSUMER_FLOW.md)
 use chrono::Utc;
 
 // Process this job in 2 hours
-let job = Job::new(task, "orders")
-    .with_eta(Utc::now() + chrono::Duration::hours(2));
-queue.enqueue(job).await?;
+queue.enqueue(task)
+    .with_eta(Utc::now() + chrono::Duration::hours(2))
+    .send().await?;
 ```
 
 **Benefits:**

@@ -2,6 +2,27 @@
 
 All notable changes to liteq will be documented in this file.
 
+## [1.1.1] - 2026-04-02
+
+### Changed
+
+#### API Improvement - Builder Pattern for Enqueue
+- **Before**: `Job::new(payload, "queue")` - redundant queue parameter
+- **After**: `queue.enqueue(payload).send().await` - cleaner API with builder pattern
+- **Scheduled jobs**: `queue.enqueue(payload).with_eta(eta).send().await`
+
+#### Removed Unused Code
+- Removed `Job::new()` queue parameter (now auto-set in `enqueue()`)
+- Removed unused `Job` fields: `created_at`, `status`
+- Removed `JobStatus` enum (no longer needed)
+- Removed unused methods: `dequeue_batch()`, `flush()`, `enqueue_at()`
+
+### Benefits
+- ✅ **Cleaner API**: No more redundant queue parameter
+- ✅ **Less Code**: Removed 55 lines of unused code
+- ✅ **Type Safe**: Builder pattern with fluent API
+- ✅ **Backward Compatible**: All functionality preserved
+
 ## [1.0.1] - 2026-03-30
 
 ### Added
