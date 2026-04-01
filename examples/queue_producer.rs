@@ -1,5 +1,5 @@
 use chrono::{Duration, Utc};
-use liteq::{Job, JobQueue, QueueConfig, RedisConfig};
+use liteq::{JobQueue, QueueConfig, RedisConfig};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,8 +26,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             text: format!("Process order immediately #{}", i),
         };
 
-        let job = Job::new(task, "orders");
-        let job_id = queue.enqueue(job).await?;
+        let job_id = queue.enqueue(task).send().await?;
 
         println!("   ✓ Regular job {} → LIST: {}", i, job_id);
     }
@@ -38,8 +37,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         text: "Send reminder email".to_string(),
     };
     let eta = Utc::now() + Duration::seconds(10);
-    let job2 = Job::new(task2, "orders").with_eta(eta);
-    let job_id2 = queue.enqueue(job2).await?;
+    let job_id2 = queue.enqueue(task2).with_eta(eta).send().await?;
     println!("   ✓ Scheduled job → ZSET: {}", job_id2);
 
     println!("Sending scheduled job (ETA +5 seconds)...");
@@ -48,8 +46,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         text: "Process payment".to_string(),
     };
     let eta_sooner = Utc::now() + Duration::seconds(5);
-    let job3 = Job::new(task3, "orders").with_eta(eta_sooner);
-    let job_id3 = queue.enqueue(job3).await?;
+    let job_id3 = queue.enqueue(task3).with_eta(eta_sooner).send().await?;
     println!("   ✓ Scheduled job → ZSET: {}", job_id3);
 
     println!("Sending ready scheduled job (ETA -5 seconds)...");
@@ -58,8 +55,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         text: "Urgent notification".to_string(),
     };
     let eta_past = Utc::now() - Duration::seconds(5);
-    let job4 = Job::new(task4, "orders").with_eta(eta_past);
-    let job_id4 = queue.enqueue(job4).await?;
+    let job_id4 = queue.enqueue(task4).with_eta(eta_past).send().await?;
     println!("   ✓ Ready scheduled job → ZSET: {}\n", job_id4);
 
     println!("✅ All tasks enqueued!\n");

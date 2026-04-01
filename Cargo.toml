@@ -1,6 +1,6 @@
 [package]
 name = "liteq"
-version = "1.1.0"
+version = "1.1.1"
 edition = "2021"
 description = "High-performance job queue library for Rust using Redis with auto-retry, connection pooling, and multi-consumer fair distribution"
 license = "MIT"

@@ -2,7 +2,7 @@ use crate::config::{QueueConfig, RedisConfig, ConsumerInfo};
 use crate::error::{JobError, JobResult};
 use crate::job::Job;
 use crate::retry::{retry_async, RetryConfig};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use redis::{AsyncCommands, Cmd, Script, Client};
 use redis::aio::ConnectionManager;
 use std::collections::HashSet;
@@ -87,6 +87,74 @@ end
 return nil
 "#;
 
+/// Builder for enqueuing jobs with optional scheduling
+pub struct Enqueuer<'a, T> {
+    queue: &'a JobQueue,
+    payload: T,
+    eta: Option<DateTime<Utc>>,
+}
+
+impl<'a, T> Enqueuer<'a, T>
+where
+    T: serde::Serialize + Send,
+{
+    /// Sets scheduled execution time (ETA)
+    pub fn with_eta(mut self, eta: DateTime<Utc>) -> Self {
+        self.eta = Some(eta);
+        self
+    }
+
+    /// Execute the enqueue operation
+    pub async fn send(self) -> JobResult<String> {
+        let mut job = Job::new(self.payload);
+        job.queue = self.queue.config.name.clone();
+
+        if let Some(eta) = self.eta {
+            job = job.with_eta(eta);
+            let job_json = job.to_json()?;
+            let schedule_key = self
+                .queue
+                .redis_config
+                .make_key(&format!("schedule:{}", self.queue.config.name));
+            let eta_timestamp = eta.timestamp();
+
+            retry_async(
+                || async {
+                    let mut conn_manager = self.queue.create_connection_manager().await?;
+                    conn_manager
+                        .zadd::<_, _, _, ()>(&schedule_key, &job_json, eta_timestamp)
+                        .await
+                        .map_err(JobError::from)?;
+                    Ok(())
+                },
+                Some(self.queue.retry_config.clone()),
+            )
+            .await?;
+        } else {
+            let job_json = job.to_json()?;
+            let queue_key = self
+                .queue
+                .redis_config
+                .make_key(&format!("queue:{}", self.queue.config.name));
+
+            retry_async(
+                || async {
+                    let mut conn_manager = self.queue.create_connection_manager().await?;
+                    conn_manager
+                        .rpush::<_, _, ()>(&queue_key, &job_json)
+                        .await
+                        .map_err(JobError::from)?;
+                    Ok(())
+                },
+                Some(self.queue.retry_config.clone()),
+            )
+            .await?;
+        }
+
+        Ok(job.id)
+    }
+}
+
 pub struct JobQueue {
     config: Arc<QueueConfig>,
     redis_config: Arc<RedisConfig>,
@@ -138,36 +206,16 @@ impl JobQueue {
             .map_err(JobError::from)
     }
 
-    /// Adds job to queue (with ETA → ZSET, without ETA → LIST)
-    pub async fn enqueue<T>(&self, job: Job<T>) -> JobResult<String>
+    /// Creates a builder for enqueuing jobs (supports immediate and scheduled)
+    pub fn enqueue<T>(&self, payload: T) -> Enqueuer<'_, T>
     where
-        T: serde::Serialize,
+        T: serde::Serialize + Send,
     {
-        let job_json = job.to_json()?;
-        let queue_key = self.redis_config.make_key(&format!("queue:{}", self.config.name));
-        let schedule_key = self.redis_config.make_key(&format!("schedule:{}", self.config.name));
-
-        let has_eta = job.eta.is_some();
-
-        retry_async(
-            || async {
-                let mut conn_manager = self.create_connection_manager().await?;
-
-                if has_eta {
-                    let eta_timestamp = job.eta.unwrap().timestamp();
-                    conn_manager.zadd::<_, _, _, ()>(&schedule_key, &job_json, eta_timestamp).await
-                        .map_err(JobError::from)?;
-                } else {
-                    conn_manager.rpush::<_, _, ()>(&queue_key, &job_json).await
-                        .map_err(JobError::from)?;
-                }
-                
-                Ok(())
-            },
-            Some(self.retry_config.clone()),
-        ).await?;
-
-        Ok(job.id)
+        Enqueuer {
+            queue: self,
+            payload,
+            eta: None,
+        }
     }
 
     /// Gets next job (prioritizes ready scheduled jobs, then regular)
@@ -272,92 +320,6 @@ impl JobQueue {
         ).await?;
 
         Ok((regular_count, scheduled_count))
-    }
-
-    /// Gets up to batch_size ready jobs at once
-    pub async fn dequeue_batch<T>(&self, batch_size: usize) -> JobResult<Vec<Job<T>>>
-    where
-        T: for<'de> serde::Deserialize<'de>,
-    {
-        if batch_size == 0 {
-            return Ok(Vec::new());
-        }
-
-        let queue_key = self.redis_config.make_key(&format!("queue:{}", self.config.name));
-        let schedule_key = self.redis_config.make_key(&format!("schedule:{}", self.config.name));
-        let current_time = Utc::now().timestamp();
-
-        let jobs = retry_async(
-            || async {
-                let mut conn_manager = self.create_connection_manager().await?;
-
-                let mut result = Vec::new();
-
-                // First, try to get ready scheduled jobs (up to batch_size)
-                let ready_jobs: Vec<String> = conn_manager
-                    .zrangebyscore_limit(&schedule_key, "-inf", current_time, 0, batch_size as isize)
-                    .await
-                    .map_err(JobError::from)?;
-
-                for job_json in ready_jobs {
-                    // Atomic ZREM to ensure no race condition
-                    let removed: i32 = conn_manager.zrem(&schedule_key, &job_json).await
-                        .map_err(JobError::from)?;
-
-                    if removed > 0 {
-                        if let Ok(job) = Job::from_json(&job_json) {
-                            result.push(job);
-                        }
-                    }
-
-                    if result.len() >= batch_size {
-                        break;
-                    }
-                }
-
-                // If we haven't filled the batch, get regular jobs
-                while result.len() < batch_size {
-                    let job_json: Option<String> = conn_manager.lpop(&queue_key, None).await
-                        .map_err(JobError::from)?;
-
-                    match job_json {
-                        Some(json) => {
-                            if let Ok(job) = Job::from_json(&json) {
-                                result.push(job);
-                            }
-                        }
-                        None => break,
-                    }
-                }
-
-                Ok(result)
-            },
-            Some(self.retry_config.clone()),
-        ).await?;
-
-        Ok(jobs)
-    }
-
-    /// Deletes all jobs (cannot be undone!)
-    #[allow(dead_code)]
-    pub async fn flush(&self) -> JobResult<()> {
-        let queue_key = self.redis_config.make_key(&format!("queue:{}", self.config.name));
-        let schedule_key = self.redis_config.make_key(&format!("schedule:{}", self.config.name));
-
-        retry_async(
-            || async {
-                let mut conn_manager = self.create_connection_manager().await?;
-
-                // Delete both LIST and ZSET
-                conn_manager.del::<_, ()>(&[&queue_key, &schedule_key]).await
-                    .map_err(JobError::from)?;
-
-                Ok(())
-            },
-            Some(self.retry_config.clone()),
-        ).await?;
-
-        Ok(())
     }
 
     /// Returns queue statistics

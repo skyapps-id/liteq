@@ -1,4 +1,4 @@
-use liteq::{Job, JobQueue, QueueConfig, RedisConfig};
+use liteq::{JobQueue, QueueConfig, RedisConfig};
 use tokio::time::{sleep, Duration};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -28,10 +28,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             text: format!("Task #{}", i),
         };
 
-        let job = Job::new(task, "test_queue");
         
         println!("Sending task #{}...", i);
-        match queue.enqueue(job).await {
+        match queue.enqueue(task).send().await {
             Ok(job_id) => println!("✓ Task #{} sent! Job ID: {}\n", i, job_id),
             Err(e) => println!("✗ Task #{} failed: {}\n", i, e),
         }

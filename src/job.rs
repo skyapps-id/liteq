@@ -16,39 +16,26 @@ pub struct Job<T> {
     pub id: String,
     pub payload: T,
     pub queue: String,
-    pub created_at: DateTime<Utc>,
     pub eta: Option<DateTime<Utc>>,
-    pub status: JobStatus,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum JobStatus {
-    /// Job is ready for immediate processing
-    Pending,
-    /// Job is scheduled for future execution
-    Scheduled,
 }
 
 impl<T> Job<T> {
-    /// Creates new job with payload and queue name
-    pub fn new(payload: T, queue: impl Into<String>) -> Self
+    /// Creates new job with payload
+    pub fn new(payload: T) -> Self
     where
         T: Serialize,
     {
         Self {
             id: generate_job_id(),
             payload,
-            queue: queue.into(),
-            created_at: Utc::now(),
+            queue: String::new(),
             eta: None,
-            status: JobStatus::Pending,
         }
     }
 
     /// Sets scheduled execution time (ETA)
     pub fn with_eta(mut self, eta: DateTime<Utc>) -> Self {
         self.eta = Some(eta);
-        self.status = JobStatus::Scheduled;
         self
     }
 
