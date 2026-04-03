@@ -2,7 +2,7 @@ use crate::config::{QueueConfig, RedisConfig, ConsumerInfo};
 use crate::connection_supervisor::ConnectionState;
 use crate::consumer_registry::ConsumerRegistry;
 use crate::error::JobResult;
-use crate::metrics::MetricsRegistry;
+use crate::metrics::{MetricsRegistry, PerformanceMetrics, QueueHealth};
 use crate::pool::RedisPool;
 use crate::queue::JobQueue;
 use crate::retry::RetryConfig;
@@ -57,7 +57,7 @@ pub struct SubscriberRegistry {
     workers_with_data: Vec<WorkerConfigWithData>,
 }
 
-pub struct QueueBuilder<'a, F = AsyncHandler> {
+pub struct QueueBuilder<'a, F> {
     registry: &'a mut SubscriberRegistry,
     queue: String,
     handler: Option<F>,
@@ -98,10 +98,19 @@ impl SubscriberRegistry {
     /// }
     /// registry.register("orders", handle)
     /// ```
-    pub fn register<'a, F, Fut>(&'a mut self, queue: impl Into<String>, handler: F) -> QueueBuilder<'a, F>
+    ///
+    /// With dependency injection:
+    /// ```ignore
+    /// async fn handle_with_ctx(data: Vec<u8>, ctx: Arc<AppContext>) -> JobResult<()> {
+    ///     Ok(())
+    /// }
+    /// registry.register("orders", handle_with_ctx)
+    ///     .with_data(ctx)
+    ///     .build();
+    /// ```
+    pub fn register<'a, F>(&'a mut self, queue: impl Into<String>, handler: F) -> QueueBuilder<'a, F>
     where
-        F: Fn(Vec<u8>) -> Fut + Send + Sync + Clone + 'static,
-        Fut: Future<Output = JobResult<()>> + Send + 'static,
+        F: Clone + Send + Sync + 'static,
     {
         QueueBuilder {
             registry: self,
@@ -113,26 +122,7 @@ impl SubscriberRegistry {
         }
     }
 
-    pub fn with_concurrency(mut self, concurrency: usize) -> Self {
-        if let Some(worker) = self.workers.last_mut() {
-            worker.concurrency = concurrency;
-        }
-        self
-    }
 
-    pub fn with_pool_size(mut self, pool_size: usize) -> Self {
-        if let Some(worker) = self.workers.last_mut() {
-            worker.pool_size = Some(pool_size);
-        }
-        self
-    }
-
-    pub fn with_min_idle(mut self, min_idle: usize) -> Self {
-        if let Some(worker) = self.workers.last_mut() {
-            worker.min_idle = Some(min_idle);
-        }
-        self
-    }
 
     /// Starts all workers (runs until Ctrl+C)
     pub async fn run(self) -> JobResult<()> {
@@ -499,11 +489,7 @@ impl SubscriberRegistry {
     }
 }
 
-impl<'a, F, Fut> QueueBuilder<'a, F>
-where
-    F: Fn(Vec<u8>) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = JobResult<()>> + Send + 'static,
-{
+impl<'a, F> QueueBuilder<'a, F> {
     /// Sets the number of concurrent workers for this queue
     ///
     /// # Arguments
@@ -572,14 +558,8 @@ where
         self.min_idle = Some(min_idle);
         self
     }
-}
 
-impl<'a, F, Fut> QueueBuilder<'a, F>
-where
-    F: Fn(Vec<u8>) -> Fut + Send + Sync + Clone + 'static,
-    Fut: Future<Output = JobResult<()>> + Send + 'static,
-{
-    /// Builds and registers the queue configuration
+    /// Builds and registers the queue configuration (for handlers without DI)
     ///
     /// # Behavior
     /// - Adds the queue to the registry
@@ -597,7 +577,11 @@ where
     /// .with_concurrency(5)
     /// .build();  // Must call build() to register
     /// ```
-    pub fn build(mut self) {
+    pub fn build<Fut>(mut self)
+    where
+        F: Fn(Vec<u8>) -> Fut + Send + Sync + Clone + 'static,
+        Fut: Future<Output = JobResult<()>> + Send + 'static,
+    {
         if let Some(handler) = self.handler.take() {
             let wrapped_handler: AsyncHandler = Arc::new(move |data: Vec<u8>| {
                 let handler = handler.clone();
@@ -629,11 +613,7 @@ where
     min_idle: Option<usize>,
 }
 
-impl<'a, F, Fut> QueueBuilder<'a, F>
-where
-    F: Fn(Vec<u8>) -> Fut + Send + Sync + Clone + 'static,
-    Fut: Future<Output = JobResult<()>> + Send + 'static,
-{
+impl<'a, F> QueueBuilder<'a, F> {
     /// Adds dependency injection support to the async handler
     ///
     /// # Type Parameters
@@ -667,10 +647,10 @@ where
     /// .with_concurrency(10)
     /// .build();
     /// ```
-    pub fn with_data<T>(mut self, data: T) -> QueueBuilderWithData<'a, T>
+    pub fn with_data<T, Fut>(mut self, data: T) -> QueueBuilderWithData<'a, T>
     where
         T: Send + Sync + 'static,
-        F: Fn(Vec<u8>, Arc<T>) -> Fut + Send + Sync + 'static,
+        F: Fn(Vec<u8>, Arc<T>) -> Fut + Send + Sync + Clone + 'static,
         Fut: Future<Output = JobResult<()>> + Send + 'static,
     {
         let data_arc = Arc::new(data);
@@ -793,5 +773,3 @@ impl Default for SubscriberRegistry {
         Self::new()
     }
 }
-
-pub use crate::metrics::{QueueHealth, PerformanceMetrics};

@@ -63,28 +63,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut registry = SubscriberRegistry::new()
         .with_redis(redis_url);
     
-    let app_data = Arc::new(AppData::new());
-    let log_data = Arc::new(AppData::new());
+    let app_data = AppData::new();
+    let log_data = AppData::new();
 
-    registry.register("orders", move |data| {
-        let app_data = app_data.clone();
-        async move {
-            handle_orders(data, app_data).await
-        }
-    })
-    .with_pool_size(20)
-    .with_concurrency(1)
-    .build();
+    registry.register("orders", handle_orders)
+        .with_data(app_data)
+        .with_pool_size(20)
+        .with_concurrency(1)
+        .build();
 
-    registry.register("logs", move |data| {
-        let log_data = log_data.clone();
-        async move {
-            handle_logs(data, log_data).await
-        }
-    })
-    .with_pool_size(5)
-    .with_concurrency(2)
-    .build();
+    registry.register("logs", handle_logs)
+        .with_data(log_data)
+        .with_pool_size(5)
+        .with_concurrency(2)
+        .build();
 
     println!("⏳ Waiting for jobs...\n");
 
